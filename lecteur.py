@@ -114,6 +114,7 @@ class LecteurAudio:
         self.dernier_temps_vlc = -1      # dernière valeur brute lue chez VLC
         self.temps_reference = 0         # temps VLC au moment de la synchro
         self.horloge_reference = None    # horloge précise au moment de la synchro
+        self._dernier_etat = None        # état VLC précédent (détection de fin)
 
         self._construire_interface()
 
@@ -354,6 +355,10 @@ class LecteurAudio:
     def _lire_index(self, index, lire=True):
         if 0 <= index < len(self.playlist):
             self.index_courant = index
+            # On réinitialise le lecteur avant de changer de média : sinon, si le
+            # morceau précédent était terminé (état Ended), un play() ultérieur
+            # (ex. barre espace) rejouerait l'ancien morceau.
+            self.player.stop()
             media = self.instance.media_new(self.playlist[index])
             self.player.set_media(media)
             self.horloge_reference = None   # nouvelle piste : repartir propre
@@ -936,12 +941,17 @@ class LecteurAudio:
             if temps >= 0:
                 self.position_precedente = temps
 
-        # Fin de morceau : on passe à la piste suivante.
+        # Fin de morceau : on passe à la piste suivante, UNE seule fois.
+        # L'état Ended persiste plusieurs frames : on ne réagit qu'à la
+        # transition vers Ended, sinon on avancerait en boucle.
         #   - boucle cochée   -> on la lance (lecture continue en boucle)
         #   - boucle décochée -> on la charge sans la lancer (lecture arrêtée)
-        if self.player.get_state() == vlc.State.Ended and self.playlist:
+        etat = self.player.get_state()
+        if (etat == vlc.State.Ended and self._dernier_etat != vlc.State.Ended
+                and self.playlist):
             suivant = (self.index_courant + 1) % len(self.playlist)
             self._lire_index(suivant, lire=self.boucle.get())
+        self._dernier_etat = etat
 
         self.racine.after(16, self._rafraichir)
 
