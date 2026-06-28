@@ -149,8 +149,11 @@ class LecteurAudio:
                                 selectbackground=VERT, selectforeground=FOND,
                                 highlightthickness=0, borderwidth=0)
         self.liste.pack(side="left", fill="both", expand=True)
-        # Simple clic = afficher la courbe (sans lire) ; double-clic = lire
-        self.liste.bind("<<ListboxSelect>>", self._selection_changee)
+        # Simple clic = afficher la courbe (sans lire) ; double-clic = lire.
+        # On écoute le vrai clic souris (et pas <<ListboxSelect>>, qui se
+        # déclenche aussi quand on change la sélection par programme — ce qui
+        # rechargeait par erreur le morceau précédent après un changement auto).
+        self.liste.bind("<ButtonRelease-1>", self._clic_liste)
         self.liste.bind("<Double-Button-1>", self._lire_selection)
 
         defilement = tk.Scrollbar(cadre_liste, command=self.liste.yview)
@@ -337,15 +340,11 @@ class LecteurAudio:
             return f"{heures}:{minutes:02d}:{secondes:02d}"
         return f"{minutes:02d}:{secondes:02d}"
 
-    def _selection_changee(self, evenement=None):
-        """Simple clic sur un fichier : on charge sa courbe sans la lire.
-
-        Le garde-fou `!= index_courant` évite la boucle infinie : `_lire_index`
-        re-sélectionne la ligne, ce qui redéclencherait cet évènement.
-        """
-        selection = self.liste.curselection()
-        if selection and selection[0] != self.index_courant:
-            self._lire_index(selection[0], lire=False)
+    def _clic_liste(self, evenement):
+        """Vrai clic souris sur un fichier : on affiche sa courbe (sans lire)."""
+        index = self.liste.nearest(evenement.y)
+        if 0 <= index < len(self.playlist) and index != self.index_courant:
+            self._lire_index(index, lire=False)
 
     def _lire_selection(self, evenement=None):
         selection = self.liste.curselection()
@@ -962,8 +961,13 @@ class LecteurAudio:
         etat = self.player.get_state()
         if (etat == vlc.State.Ended and self._dernier_etat != vlc.State.Ended
                 and self.playlist):
-            suivant = (self.index_courant + 1) % len(self.playlist)
-            self._lire_index(suivant, lire=self.boucle.get())
+            if self.index_courant + 1 < len(self.playlist):
+                # Il reste une piste après : on y passe (lue si boucle activée)
+                self._lire_index(self.index_courant + 1, lire=self.boucle.get())
+            elif self.boucle.get():
+                # Dernière piste + boucle : on recommence la playlist
+                self._lire_index(0, lire=True)
+            # else : dernière piste, boucle off -> on s'arrête (rien à charger)
         self._dernier_etat = etat
 
         self.racine.after(16, self._rafraichir)
