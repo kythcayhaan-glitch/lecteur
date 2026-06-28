@@ -115,6 +115,7 @@ class LecteurAudio:
         self.temps_reference = 0         # temps VLC au moment de la synchro
         self.horloge_reference = None    # horloge précise au moment de la synchro
         self._dernier_etat = None        # état VLC précédent (détection de fin)
+        self._dernier_play_pause = 0.0   # anti-rebond de la barre espace
 
         self._construire_interface()
 
@@ -283,6 +284,24 @@ class LecteurAudio:
             font=("Segoe UI", 150, "bold"))
         self.label_overlay_chiffre.pack(expand=True)
 
+        # Empêche les boutons d'être « cliqués » par la barre espace quand ils
+        # ont le focus : sinon Espace activerait le bouton EN PLUS du raccourci
+        # play/pause global (double déclenchement -> lecture puis pause).
+        self._neutraliser_espace(self.racine)
+
+    def _neutraliser_espace(self, widget):
+        """La barre espace = play/pause partout, même quand un bouton a le focus.
+
+        On route l'espace des boutons vers _touche_espace (qui joue/met en pause
+        une fois puis renvoie « break ») : ça empêche le bouton de s'activer en
+        plus du raccourci, donc plus de double déclenchement.
+        """
+        for enfant in widget.winfo_children():
+            if isinstance(enfant, (tk.Button, tk.Checkbutton)):
+                enfant.bind("<space>", self._touche_espace)
+                enfant.configure(takefocus=0)
+            self._neutraliser_espace(enfant)
+
     # ------------------------------------------------------------------ #
     #  Gestion de la playlist
     # ------------------------------------------------------------------ #
@@ -394,6 +413,13 @@ class LecteurAudio:
         return "break"
 
     def play_pause(self):
+        # Anti-rebond : un même appui peut générer deux évènements rapprochés
+        # (ex. barre espace + activation d'un bouton ayant le focus). On ignore
+        # le second appel à moins de 0,2 s pour éviter un play suivi d'un pause.
+        maintenant = time.perf_counter()
+        if maintenant - self._dernier_play_pause < 0.2:
+            return
+        self._dernier_play_pause = maintenant
         if not self.playlist:
             return
         if self.index_courant == -1:
@@ -724,12 +750,14 @@ class LecteurAudio:
                 ligne = tk.Frame(self.cadre_reperes, bg=FOND)
                 ligne.pack(anchor="center")
                 largeur_ligne = 0
-            tk.Button(ligne, text=libelle,
+            bouton = tk.Button(ligne, text=libelle,
                       command=lambda t=cm["temps"]: self._aller_repere(t),
                       bg=FOND_CLAIR, fg="#ffb300", activebackground="#333333",
                       activeforeground="#ffb300", relief="flat", borderwidth=0,
                       highlightthickness=0, font=("Segoe UI", 9),
-                      padx=6, pady=2).pack(side="left", padx=3, pady=2)
+                      padx=6, pady=2, takefocus=0)
+            bouton.bind("<space>", self._touche_espace)
+            bouton.pack(side="left", padx=3, pady=2)
             largeur_ligne += largeur_btn
 
     def _aller_repere(self, temps):
