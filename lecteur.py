@@ -148,7 +148,8 @@ class LecteurAudio:
         self.liste = tk.Listbox(cadre_liste, activestyle="none",
                                 bg=FOND_CLAIR, fg=TEXTE,
                                 selectbackground=VERT, selectforeground=FOND,
-                                highlightthickness=0, borderwidth=0)
+                                highlightthickness=0, borderwidth=0,
+                                exportselection=False)
         self.liste.pack(side="left", fill="both", expand=True)
         # Simple clic = afficher la courbe (sans lire) ; double-clic = lire.
         # On écoute le vrai clic souris (et pas <<ListboxSelect>>, qui se
@@ -370,6 +371,18 @@ class LecteurAudio:
         if selection:
             self._lire_index(selection[0])
 
+    def _surligner_courant(self):
+        """Force le surlignage de la liste sur la piste réellement courante.
+
+        Appelé à chaque (re)lecture : même si le surlignage a glissé entre-temps
+        (timing VLC/Tk en fin de morceau), la ligne en vert correspond toujours
+        à `index_courant`, donc à la musique qui joue.
+        """
+        if 0 <= self.index_courant < self.liste.size():
+            self.liste.selection_clear(0, "end")
+            self.liste.selection_set(self.index_courant)
+            self.liste.see(self.index_courant)
+
     def _lire_index(self, index, lire=True):
         if 0 <= index < len(self.playlist):
             self.index_courant = index
@@ -386,8 +399,7 @@ class LecteurAudio:
             self._annuler_alerte()          # stoppe un décompte/alerte en cours
             self.label_titre.config(text=os.path.basename(self.playlist[index]))
             # Surligne la piste en cours dans la liste
-            self.liste.selection_clear(0, "end")
-            self.liste.selection_set(index)
+            self._surligner_courant()
             # Lance le calcul de la forme d'onde + lecture des infos (sans bloquer)
             self._lancer_forme_onde(self.playlist[index])
             self._lancer_infos(self.playlist[index])
@@ -432,6 +444,7 @@ class LecteurAudio:
             # Reprise depuis la pause : on conserve la position.
             self.player.play()
             self.bouton_play.config(text="⏸")
+            self._surligner_courant()
         else:
             # Arrêté / terminé / chargé sans lecture : on (re)charge
             # explicitement le média de la piste courante avant de jouer,
@@ -442,6 +455,8 @@ class LecteurAudio:
             self.player.play()
             self.horloge_reference = None
             self.bouton_play.config(text="⏸")
+            # La liste suit toujours la piste qui démarre réellement.
+            self._surligner_courant()
 
     def stop(self):
         self.player.stop()
