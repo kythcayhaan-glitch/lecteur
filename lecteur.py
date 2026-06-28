@@ -571,8 +571,15 @@ class LecteurAudio:
             return
         position = self._parser_temps(self.champ_aller.get())
         duree = self._duree_courante()
-        if position is not None and duree > 0:
-            self._appliquer_position(position, duree)
+        if position is None or duree <= 0:
+            return
+        self._appliquer_position(position, duree)
+        # Propose de poser un cue (repère) à ce temps
+        temps = int(max(0, min(position, duree)))
+        if messagebox.askyesno(
+                "Cue", f"Créer un cue à {formate_temps(temps)} ?",
+                parent=self.racine):
+            self._ajouter_repere(temps)
 
     def _parser_temps(self, texte):
         """Convertit « mm:ss(.mmm) », « h:mm:ss » ou « ss » en ms (None si KO)."""
@@ -657,8 +664,12 @@ class LecteurAudio:
             return
         # Sinon -> nouveau repère au temps cliqué
         temps = int(max(0.0, min(1.0, evenement.x / largeur)) * duree)
+        self._ajouter_repere(temps)
+
+    def _ajouter_repere(self, temps):
+        """Demande un texte et crée un repère (cue) au temps donné (ms)."""
         texte = simpledialog.askstring(
-            "Nouveau repère",
+            "Nouveau cue",
             f"Commentaire à {formate_temps(temps)} :", parent=self.racine)
         if texte:
             reperes = self._reperes_courants()
