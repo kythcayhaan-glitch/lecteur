@@ -1,0 +1,11 @@
+# Fichiers temporaires de compilation PyInstaller
+build/
+*.spec
+
+# L'exe est lourd (71 Mo) : on ne le met pas dans le dépôt.
+# Il peut être distribué via une "Release" GitHub à la place.
+dist/
+
+# Cache Python
+__pycache__/
+*.pyc
