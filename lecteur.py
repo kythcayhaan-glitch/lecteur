@@ -15,7 +15,7 @@ import sys
 import json
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog, simpledialog, messagebox, font as tkfont
+from tkinter import ttk, filedialog, font as tkfont
 
 # Quand le programme tourne en .exe (PyInstaller), VLC est embarqué dans le
 # paquet : on indique à python-vlc où trouver libvlc.dll et les plugins.
@@ -62,16 +62,28 @@ class LecteurAudio:
     def __init__(self, racine):
         self.racine = racine
         self.racine.title("Kyth Player")
-        self.racine.geometry("460x660")
-        self.racine.minsize(420, 600)
+
+        # --- Adaptation à la résolution de l'écran ---
+        # Toutes les tailles (polices, hauteur de la forme d'onde, fenêtre) sont
+        # multipliées par un facteur calculé sur la hauteur de l'écran. Référence
+        # 1440 px : l'interface garde les mêmes proportions quelle que soit la
+        # résolution (réduite en 1080p, agrandie en 4K).
+        ecran_l = self.racine.winfo_screenwidth()
+        ecran_h = self.racine.winfo_screenheight()
+        self.echelle = max(0.7, min(2.5, ecran_h / 1440))
+
+        # Fenêtre à 80 % de l'écran, centrée (barre de titre conservée :
+        # réduire / agrandir / fermer restent accessibles).
+        largeur, hauteur = int(ecran_l * 0.8), int(ecran_h * 0.8)
+        x, y = (ecran_l - largeur) // 2, (ecran_h - hauteur) // 2
+        self._geo_normale = f"{largeur}x{hauteur}+{x}+{y}"
+        self.racine.geometry(self._geo_normale)
+        self.racine.minsize(self._e(420), self._e(600))
         self.racine.configure(bg=FOND)
 
-        # Démarrage en plein écran ; Échap pour quitter, F11 pour basculer
-        self.racine.attributes("-fullscreen", True)
-        self.racine.bind(
-            "<Escape>", lambda e: self.racine.attributes("-fullscreen", False))
-        self.racine.bind("<F11>", lambda e: self.racine.attributes(
-            "-fullscreen", not self.racine.attributes("-fullscreen")))
+        # F11 bascule le vrai plein écran ; Échap en sort vers la fenêtre 80 %.
+        self.racine.bind("<Escape>", self._quitter_plein_ecran)
+        self.racine.bind("<F11>", self._basculer_plein_ecran)
         # Barre espace = lecture / pause
         self.racine.bind("<space>", self._touche_espace)
 
@@ -92,6 +104,11 @@ class LecteurAudio:
         self.forme_onde = None      # tableau numpy des crêtes (0..1) ou None
         self.token_onde = 0         # jeton de la piste en cours de décodage
         self.ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        # Zoom de la forme d'onde : fenêtre visible [début, fin] en fraction de
+        # la piste (0..1). 0→1 = piste entière ; molette pour zoomer/dézoomer.
+        self.zoom_debut = 0.0
+        self.zoom_fin = 1.0
+        self._derniere_position = 0  # dernière position dessinée (curseur) en ms
 
         # --- Repères / commentaires (persistés sur disque) ---
         # {chemin_fichier: [{"temps": ms, "texte": "..."}, ...]}
@@ -116,11 +133,170 @@ class LecteurAudio:
         self.horloge_reference = None    # horloge précise au moment de la synchro
         self._dernier_etat = None        # état VLC précédent (détection de fin)
         self._dernier_play_pause = 0.0   # anti-rebond de la barre espace
+        # Mémorise la dernière confirmation (temps, index, réponse) : un double-clic
+        # génère simple + double clic ; on réutilise la réponse pour n'afficher
+        # qu'une seule boîte de dialogue.
+        self._derniere_confirmation = (0.0, -1, False)
 
         self._construire_interface()
 
         # Mise à jour régulière de la barre + compteurs (toutes les 500 ms)
         self._rafraichir()
+
+    def _e(self, taille):
+        """Adapte une taille (police, dimension en px) à la résolution écran."""
+        return max(1, int(round(taille * self.echelle)))
+
+    def _basculer_plein_ecran(self, evenement=None):
+        """F11 : bascule entre vrai plein écran et fenêtre à 80 %."""
+        plein = not self.racine.attributes("-fullscreen")
+        self.racine.attributes("-fullscreen", plein)
+        if not plein:
+            self.racine.geometry(self._geo_normale)   # retour à la fenêtre 80 %
+
+    def _quitter_plein_ecran(self, evenement=None):
+        """Échap : sort du vrai plein écran en revenant à la fenêtre à 80 %."""
+        if self.racine.attributes("-fullscreen"):
+            self.racine.attributes("-fullscreen", False)
+            self.racine.geometry(self._geo_normale)
+
+    # ------------------------------------------------------------------ #
+    #  Fenêtres de dialogue personnalisées (assorties au thème sombre)
+    # ------------------------------------------------------------------ #
+    def _eclaircir(self, couleur, facteur=0.22):
+        """Éclaircit une couleur hexadécimale (pour l'effet de survol)."""
+        couleur = couleur.lstrip("#")
+        r, g, b = (int(couleur[i:i + 2], 16) for i in (0, 2, 4))
+        r = int(r + (255 - r) * facteur)
+        g = int(g + (255 - g) * facteur)
+        b = int(b + (255 - b) * facteur)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _bouton_dialogue(self, parent, texte, commande, primaire=False,
+                         accent=VERT):
+        """Bouton plat avec survol, pour les fenêtres de dialogue."""
+        fond = accent if primaire else "#2a2a2a"
+        avant = FOND if primaire else TEXTE
+        survol = self._eclaircir(accent) if primaire else "#3d3d3d"
+        bouton = tk.Button(parent, text=texte, command=commande, bg=fond,
+                           fg=avant, activebackground=survol,
+                           activeforeground=avant, relief="flat", borderwidth=0,
+                           highlightthickness=0, cursor="hand2", takefocus=0,
+                           font=("Segoe UI", self._e(12), "bold"),
+                           padx=self._e(24), pady=self._e(9))
+        bouton.bind("<Enter>", lambda e: bouton.config(bg=survol))
+        bouton.bind("<Leave>", lambda e: bouton.config(bg=fond))
+        return bouton
+
+    def _creer_dialogue(self, titre, accent):
+        """Toplevel sombre, sans bordure système, centré sur la fenêtre.
+
+        Renvoie (fenetre, cadre_contenu). La bordure colorée est obtenue avec un
+        fond accentué sur lequel on pose un cadre intérieur sombre.
+        """
+        top = tk.Toplevel(self.racine)
+        top.withdraw()
+        top.overrideredirect(True)
+        top.configure(bg=accent)
+        top.attributes("-topmost", True)
+        cadre = tk.Frame(top, bg=FOND_CLAIR)
+        cadre.pack(padx=self._e(2), pady=self._e(2))   # liseré accentué de 2 px
+        tk.Label(cadre, text=titre, bg=FOND_CLAIR, fg=accent,
+                 font=("Segoe UI", self._e(15), "bold")).pack(
+                 anchor="w", padx=self._e(24), pady=(self._e(20), self._e(6)))
+        return top, cadre
+
+    def _placer_dialogue(self, top):
+        """Centre le dialogue sur la fenêtre principale et le rend modal."""
+        self.racine.update_idletasks()
+        top.update_idletasks()
+        largeur, hauteur = top.winfo_reqwidth(), top.winfo_reqheight()
+        px = self.racine.winfo_rootx() + (self.racine.winfo_width() - largeur) // 2
+        py = self.racine.winfo_rooty() + (self.racine.winfo_height() - hauteur) // 3
+        top.geometry(f"+{px}+{py}")
+        top.deiconify()
+        top.lift()
+        top.grab_set()
+        top.focus_force()
+
+    def _demander_oui_non(self, titre, message, oui="Oui", non="Non",
+                          accent=VERT):
+        """Confirmation Oui/Non façon thème sombre. Renvoie True/False."""
+        resultat = {"valeur": False}
+        top, cadre = self._creer_dialogue(titre, accent)
+        tk.Label(cadre, text=message, bg=FOND_CLAIR, fg=TEXTE, justify="left",
+                 font=("Segoe UI", self._e(12)), wraplength=self._e(440)).pack(
+                 anchor="w", padx=self._e(24), pady=(0, self._e(20)))
+        barre = tk.Frame(cadre, bg=FOND_CLAIR)
+        barre.pack(fill="x", padx=self._e(24), pady=(0, self._e(20)))
+
+        def repondre(valeur):
+            resultat["valeur"] = valeur
+            top.destroy()
+
+        self._bouton_dialogue(barre, non, lambda: repondre(False)).pack(
+            side="right", padx=(self._e(10), 0))
+        b_oui = self._bouton_dialogue(barre, oui, lambda: repondre(True),
+                                      primaire=True, accent=accent)
+        b_oui.pack(side="right")
+        top.bind("<Return>", lambda e: repondre(True))
+        top.bind("<Escape>", lambda e: repondre(False))
+        top.bind("<space>", lambda e: "break")
+        self._placer_dialogue(top)
+        b_oui.focus_set()
+        self.racine.wait_window(top)
+        return resultat["valeur"]
+
+    def _info(self, titre, message, accent=VERT):
+        """Message d'information avec un seul bouton OK (thème sombre)."""
+        top, cadre = self._creer_dialogue(titre, accent)
+        tk.Label(cadre, text=message, bg=FOND_CLAIR, fg=TEXTE, justify="left",
+                 font=("Segoe UI", self._e(12)), wraplength=self._e(440)).pack(
+                 anchor="w", padx=self._e(24), pady=(0, self._e(20)))
+        barre = tk.Frame(cadre, bg=FOND_CLAIR)
+        barre.pack(fill="x", padx=self._e(24), pady=(0, self._e(20)))
+        bouton = self._bouton_dialogue(barre, "OK", top.destroy, primaire=True,
+                                       accent=accent)
+        bouton.pack(side="right")
+        top.bind("<Return>", lambda e: top.destroy())
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._placer_dialogue(top)
+        bouton.focus_set()
+        self.racine.wait_window(top)
+
+    def _demander_texte(self, titre, message, accent=VERT):
+        """Saisie de texte façon thème sombre. Renvoie la chaîne ou None."""
+        resultat = {"valeur": None}
+        top, cadre = self._creer_dialogue(titre, accent)
+        tk.Label(cadre, text=message, bg=FOND_CLAIR, fg=TEXTE, justify="left",
+                 font=("Segoe UI", self._e(12))).pack(
+                 anchor="w", padx=self._e(24), pady=(0, self._e(10)))
+        champ = tk.Entry(cadre, bg=FOND, fg=TEXTE, insertbackground=TEXTE,
+                         relief="flat", justify="left", width=32,
+                         font=("Consolas", self._e(13)))
+        champ.pack(fill="x", padx=self._e(24), ipady=self._e(5),
+                   pady=(0, self._e(20)))
+        barre = tk.Frame(cadre, bg=FOND_CLAIR)
+        barre.pack(fill="x", padx=self._e(24), pady=(0, self._e(20)))
+
+        def valider():
+            resultat["valeur"] = champ.get()
+            top.destroy()
+
+        def annuler():
+            resultat["valeur"] = None
+            top.destroy()
+
+        self._bouton_dialogue(barre, "Annuler", annuler).pack(
+            side="right", padx=(self._e(10), 0))
+        self._bouton_dialogue(barre, "Valider", valider, primaire=True,
+                              accent=accent).pack(side="right")
+        top.bind("<Return>", lambda e: valider())
+        top.bind("<Escape>", lambda e: annuler())
+        self._placer_dialogue(top)
+        champ.focus_set()
+        self.racine.wait_window(top)
+        return resultat["valeur"]
 
     # ------------------------------------------------------------------ #
     #  Construction de l'interface
@@ -130,20 +306,25 @@ class LecteurAudio:
         style_bouton = dict(bg=FOND_CLAIR, fg=TEXTE, activebackground="#333333",
                             activeforeground=TEXTE, relief="flat",
                             borderwidth=0, highlightthickness=0,
-                            font=("Segoe UI", 18), padx=8, pady=6)
+                            font=("Segoe UI", self._e(18)), padx=self._e(8),
+                            pady=self._e(6))
 
         # --- Barre du haut : titre + alerte de repère (en grand, en rouge) ---
         cadre_haut = tk.Frame(self.racine, bg=FOND)
         cadre_haut.pack(fill="x", pady=(10, 4))
 
         self.label_titre = tk.Label(cadre_haut, text="Aucune piste",
-                                    font=("Segoe UI", 24, "bold"),
+                                    font=("Segoe UI", self._e(24), "bold"),
                                     bg=FOND, fg=TEXTE)
         self.label_titre.pack(side="left", padx=10)
 
-        # --- Playlist ---
-        cadre_liste = tk.Frame(self.racine, bg=FOND)
-        cadre_liste.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+        # --- Zone centrale : playlist (gauche) + timecodes (droite) ---
+        cadre_central = tk.Frame(self.racine, bg=FOND)
+        cadre_central.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+
+        # Playlist (colonne de gauche, largeur réduite)
+        cadre_liste = tk.Frame(cadre_central, bg=FOND)
+        cadre_liste.pack(side="left", fill="both", expand=True)
 
         self.liste = tk.Listbox(cadre_liste, activestyle="none",
                                 bg=FOND_CLAIR, fg=TEXTE,
@@ -157,22 +338,46 @@ class LecteurAudio:
         # rechargeait par erreur le morceau précédent après un changement auto).
         self.liste.bind("<ButtonRelease-1>", self._clic_liste)
         self.liste.bind("<Double-Button-1>", self._lire_selection)
+        # Retrait d'un morceau : clic droit sur la ligne, ou touche Suppr
+        self.liste.bind("<Button-3>", self._clic_droit_liste)
+        self.liste.bind("<Delete>", self._supprimer_selection)
 
         defilement = tk.Scrollbar(cadre_liste, command=self.liste.yview)
         defilement.pack(side="right", fill="y")
         self.liste.config(yscrollcommand=defilement.set)
 
-        # --- Infos du fichier (codec, fréquence, canaux, débit, durée) ---
-        self.label_infos = tk.Label(self.racine, text="",
-                                    font=("Segoe UI", 9), bg=FOND, fg="#9e9e9e")
-        self.label_infos.pack(pady=(0, 4))
+        # Timecodes (colonne de droite) : écoulé (vert) au-dessus, restant
+        # (rouge) en dessous, empilés et centrés verticalement face à la liste.
+        # Police à chasse fixe (Consolas) : les chiffres gardent la même largeur,
+        # donc les compteurs ne bougent pas quand les millisecondes défilent.
+        cadre_compteurs = tk.Frame(cadre_central, bg=FOND)
+        cadre_compteurs.pack(side="right", fill="y", padx=(12, 0))
+        bloc_compteurs = tk.Frame(cadre_compteurs, bg=FOND)
+        bloc_compteurs.pack(expand=True)
+
+        self.label_ecoule = tk.Label(bloc_compteurs, text="00:00.000",
+                                     font=("Consolas", self._e(54)), width=10,
+                                     anchor="center", bg=FOND, fg=VERT)
+        self.label_ecoule.pack()
+        self.label_restant = tk.Label(bloc_compteurs, text="-00:00.000",
+                                      font=("Consolas", self._e(54)), width=10,
+                                      anchor="center", bg=FOND, fg=ROUGE)
+        self.label_restant.pack()
+
+        # Infos du fichier (codec, fréquence, canaux, débit, durée) : sous les
+        # timers, dans la colonne de droite. La playlist ne montre que les noms.
+        self.label_infos = tk.Label(bloc_compteurs, text="", justify="center",
+                                    font=("Segoe UI", self._e(11)), bg=FOND,
+                                    fg="#9e9e9e", wraplength=self._e(360))
+        self.label_infos.pack(pady=(self._e(10), 0))
 
         # --- Forme d'onde : clic gauche = déplacer, clic droit = repère ---
-        self.canvas_onde = tk.Canvas(self.racine, height=170, bg=FOND_CLAIR,
-                                     highlightthickness=0)
+        self.canvas_onde = tk.Canvas(self.racine, height=self._e(170),
+                                     bg=FOND_CLAIR, highlightthickness=0)
         self.canvas_onde.pack(fill="x", padx=10, pady=(0, 6))
         self.canvas_onde.bind("<Button-1>", self._clic_onde)
         self.canvas_onde.bind("<Button-3>", self._clic_droit_onde)
+        self.canvas_onde.bind("<MouseWheel>", self._zoom_onde)   # molette = zoom
         self.canvas_onde.bind("<Motion>", self._survol_onde)
         self.canvas_onde.bind("<Leave>",
                               lambda e: self.canvas_onde.delete("infobulle"))
@@ -182,23 +387,7 @@ class LecteurAudio:
         self.cadre_reperes = tk.Frame(self.racine, bg=FOND)
         self.cadre_reperes.pack(fill="x", padx=10, pady=(0, 4))
 
-        # --- Compteurs empilés : écoulé (vert) au-dessus, restant (rouge) en dessous ---
-        cadre_compteurs = tk.Frame(self.racine, bg=FOND)
-        cadre_compteurs.pack(fill="x", padx=10)
-
-        # Police à chasse fixe (Consolas) : tous les chiffres ont la même
-        # largeur, donc les compteurs ne bougent plus quand les ms défilent.
-        self.label_ecoule = tk.Label(cadre_compteurs, text="00:00.000",
-                                     font=("Consolas", 54), width=10,
-                                     anchor="center", bg=FOND, fg=VERT)
-        self.label_ecoule.pack()
-
-        self.label_restant = tk.Label(cadre_compteurs, text="-00:00.000",
-                                      font=("Consolas", 54), width=10,
-                                      anchor="center", bg=FOND, fg=ROUGE)
-        self.label_restant.pack()
-
-        # --- Barre de progression (pleine largeur, sous les compteurs) ---
+        # --- Barre de progression (pleine largeur) ---
         cadre_progression = tk.Frame(self.racine, bg=FOND)
         cadre_progression.pack(fill="x", padx=10, pady=(2, 0))
 
@@ -230,22 +419,23 @@ class LecteurAudio:
                        selectcolor=VERT, activebackground="#333333",
                        activeforeground=TEXTE, relief="flat",
                        borderwidth=0, highlightthickness=0, offrelief="flat",
-                       font=("Segoe UI", 18), padx=8,
-                       pady=6).pack(side="left", padx=3)
+                       font=("Segoe UI", self._e(18)), padx=self._e(8),
+                       pady=self._e(6)).pack(side="left", padx=3)
 
         # Temps total de la playlist, à côté des boutons
         self.label_total = tk.Label(cadre_boutons, text="Σ 00:00",
-                                    font=("Segoe UI", 14), bg=FOND, fg=TEXTE)
+                                    font=("Segoe UI", self._e(14)),
+                                    bg=FOND, fg=TEXTE)
         self.label_total.pack(side="left", padx=(14, 3))
 
         # --- Aller à un temps précis ---
         cadre_aller = tk.Frame(self.racine, bg=FOND)
         cadre_aller.pack(pady=(0, 4))
         tk.Label(cadre_aller, text="Aller à :", bg=FOND, fg=TEXTE,
-                 font=("Segoe UI", 12)).pack(side="left", padx=(0, 6))
+                 font=("Segoe UI", self._e(12))).pack(side="left", padx=(0, 6))
         self.champ_aller = tk.Entry(cadre_aller, width=11, justify="center",
                                     bg=FOND_CLAIR, fg=TEXTE, insertbackground=TEXTE,
-                                    relief="flat", font=("Consolas", 14))
+                                    relief="flat", font=("Consolas", self._e(14)))
         self.champ_aller.pack(side="left")
         self.champ_aller.bind("<Return>", self._aller_a)
         tk.Button(cadre_aller, text="→", command=self._aller_a,
@@ -262,10 +452,25 @@ class LecteurAudio:
         self.volume.pack(side="left", fill="x", expand=True, padx=6)
         self.player.audio_set_volume(100)
 
-        # --- Ajout de fichiers ---
-        tk.Button(self.racine, text="➕ Ajouter des fichiers…",
+        # --- Ajout de fichiers + conversion WAV (synchro fiable) ---
+        cadre_fichiers = tk.Frame(self.racine, bg=FOND)
+        cadre_fichiers.pack(pady=(0, 10))
+        tk.Button(cadre_fichiers, text="➕ Ajouter des fichiers…",
                   command=self.ajouter_fichiers,
-                  **style_bouton).pack(pady=(0, 10))
+                  **style_bouton).pack(side="left", padx=4)
+        self._texte_convertir = "🎚 Convertir en WAV 48 kHz"
+        self.bouton_convertir = tk.Button(cadre_fichiers,
+                  text=self._texte_convertir, command=self.convertir_wav,
+                  **style_bouton)
+        self.bouton_convertir.pack(side="left", padx=4)
+        self._texte_normaliser = "🔊 Normaliser à -3 dB"
+        self.bouton_normaliser = tk.Button(cadre_fichiers,
+                  text=self._texte_normaliser, command=self.normaliser,
+                  **style_bouton)
+        self.bouton_normaliser.pack(side="left", padx=4)
+        tk.Button(cadre_fichiers, text="🗑 Vider la playlist",
+                  command=self.vider_playlist,
+                  **style_bouton).pack(side="left", padx=4)
 
         # --- Overlay d'alerte : fenêtre rouge semi-transparente (cachée) ---
         # Une Toplevel permet la transparence (attribut -alpha), impossible sur
@@ -278,11 +483,12 @@ class LecteurAudio:
         self.overlay.bind("<space>", self._touche_espace)  # garde le play/pause
         self.label_overlay_texte = tk.Label(
             self.overlay, text="", fg="#ffffff", bg="#ff0000",
-            font=("Segoe UI", 80, "bold"), wraplength=1500, justify="center")
+            font=("Segoe UI", self._e(80), "bold"),
+            wraplength=self._e(1500), justify="center")
         self.label_overlay_texte.pack(pady=(60, 10))
         self.label_overlay_chiffre = tk.Label(
             self.overlay, text="", fg="#ffffff", bg="#ff0000",
-            font=("Segoe UI", 150, "bold"))
+            font=("Segoe UI", self._e(150), "bold"))
         self.label_overlay_chiffre.pack(expand=True)
 
         # Empêche les boutons d'être « cliqués » par la barre espace quand ils
@@ -316,36 +522,270 @@ class LecteurAudio:
             self.playlist.append(chemin)
             self.durees.append(0)   # durée remplie par le thread d'infos
             index = len(self.playlist) - 1
-            # Ligne provisoire : le nom, en attendant les infos (…)
-            self.liste.insert("end", os.path.basename(chemin) + "   —   …")
+            # La playlist n'affiche que le nom ; les infos détaillées s'affichent
+            # sous les timers quand la piste est sélectionnée.
+            self.liste.insert("end", os.path.basename(chemin))
             nouveaux.append((index, chemin))
-        # Calcul des infos en arrière-plan (un seul thread, séquentiel)
+        # Calcul des durées en arrière-plan (pour le temps total cumulé)
         if nouveaux:
             threading.Thread(target=self._charger_infos_liste,
                              args=(nouveaux,), daemon=True).start()
 
-    def _charger_infos_liste(self, elements):
-        """Lit les infos de chaque fichier ajouté et met à jour sa ligne."""
-        for index, chemin in elements:
-            infos, duree = self._infos_fichier(chemin)
-            self.racine.after(0, lambda i=index, c=chemin, inf=infos, d=duree:
-                              self._maj_ligne_liste(i, c, inf, d))
+    def _clic_droit_liste(self, evenement):
+        """Clic droit sur une ligne : propose de retirer ce morceau."""
+        index = self.liste.nearest(evenement.y)
+        if 0 <= index < len(self.playlist):
+            self._retirer_morceau(index)
+        return "break"
 
-    def _maj_ligne_liste(self, index, chemin, infos, duree):
-        """Remplace la ligne `index` par « nom — infos » (sélection préservée)."""
+    def _supprimer_selection(self, evenement=None):
+        """Touche Suppr : retire le morceau sélectionné."""
+        selection = self.liste.curselection()
+        if selection:
+            self._retirer_morceau(selection[0])
+        return "break"
+
+    def _retirer_morceau(self, index):
+        """Retire un seul morceau de la playlist (fichier/repères conservés)."""
+        if not (0 <= index < len(self.playlist)):
+            return
+        nom = os.path.basename(self.playlist[index])
+        if not self._demander_oui_non(
+                "Retirer le morceau",
+                f"Retirer ce morceau de la playlist ?\n\n{nom}",
+                oui="Retirer", accent=ROUGE):
+            return
+        courant_supprime = (index == self.index_courant)
+        if courant_supprime:
+            self.player.stop()
+            self._annuler_alerte()
+        del self.playlist[index]
+        if index < len(self.durees):
+            del self.durees[index]
+        self.liste.delete(index)
+        self._maj_temps_total()
+        if courant_supprime:
+            # La piste en cours a disparu : on remet l'affichage à zéro.
+            self.index_courant = -1
+            self.token_onde += 1
+            self.forme_onde = None
+            self.horloge_reference = None
+            self.position_demandee = None
+            self.canvas_onde.delete("all")
+            self.label_titre.config(text="Aucune piste")
+            self.label_infos.config(text="")
+            self.label_ecoule.config(text="00:00.000")
+            self.label_restant.config(text="-00:00.000")
+            self.barre.set(0)
+            self.bouton_play.config(text="▶")
+            self._maj_boutons_reperes()
+        else:
+            # On garde la piste courante : son index glisse si on a retiré avant.
+            if index < self.index_courant:
+                self.index_courant -= 1
+            self._surligner_courant()
+
+    def vider_playlist(self):
+        """Retire tous les morceaux de la playlist et remet le lecteur à zéro.
+
+        Les fichiers et leurs repères (commentaires.json) restent intacts sur le
+        disque : on ne vide que la liste en cours.
+        """
+        if not self.playlist:
+            return
+        if not self._demander_oui_non(
+                "Vider la playlist",
+                f"Retirer les {len(self.playlist)} morceau(x) de la playlist ?\n\n"
+                "Les fichiers et leurs repères ne sont pas supprimés du disque.",
+                oui="Vider", accent=ROUGE):
+            return
+        self.player.stop()
+        self._annuler_alerte()
+        self.playlist.clear()
+        self.durees.clear()
+        self.index_courant = -1
+        self.token_onde += 1            # invalide tout décodage d'onde en cours
+        self.forme_onde = None
+        self.horloge_reference = None
+        self.position_demandee = None
+        self.liste.delete(0, "end")
+        self.canvas_onde.delete("all")
+        self.label_titre.config(text="Aucune piste")
+        self.label_infos.config(text="")
+        self.label_ecoule.config(text="00:00.000")
+        self.label_restant.config(text="-00:00.000")
+        self.barre.set(0)
+        self.bouton_play.config(text="▶")
+        self._maj_temps_total()
+        self._maj_boutons_reperes()
+
+    # ------------------------------------------------------------------ #
+    #  Conversion en WAV 48 kHz (timeline échantillon-exacte pour les cues)
+    # ------------------------------------------------------------------ #
+    def convertir_wav(self):
+        """Convertit tous les fichiers de la playlist en WAV 48 kHz.
+
+        Les MP3 (surtout VBR) donnent une position imprécise : les cues dérivent.
+        Le WAV est échantillon-exact, donc les repères tombent toujours juste.
+        Les originaux sont conservés ; chaque sortie est écrite en « _48k.wav »
+        à côté de la source, et remplace la piste dans la playlist.
+        """
+        if not self.playlist:
+            return
+        if not self._demander_oui_non(
+                "Convertir en WAV 48 kHz",
+                f"Convertir les {len(self.playlist)} fichier(s) de la playlist "
+                "en WAV 48 kHz ?\n\n"
+                "• Les originaux sont conservés (sortie « _48k.wav »).\n"
+                "• Les repères sont copiés sur les nouveaux fichiers "
+                "(à revérifier).\n"
+                "• La synchro des cues devient fiable (plus de dérive MP3)."):
+            return
+        self.bouton_convertir.config(state="disabled")
+        fichiers = list(enumerate(self.playlist))
+        threading.Thread(target=self._convertir_thread,
+                         args=(fichiers,), daemon=True).start()
+
+    def _convertir_thread(self, fichiers):
+        total = len(fichiers)
+        echecs = 0
+        for rang, (index, chemin) in enumerate(fichiers, start=1):
+            self.racine.after(0, lambda r=rang, t=total:
+                              self.bouton_convertir.config(
+                                  text=f"Conversion {r}/{t}…"))
+            sortie = os.path.splitext(chemin)[0] + "_48k.wav"
+            try:
+                subprocess.run(
+                    [self.ffmpeg, "-v", "quiet", "-y", "-i", chemin,
+                     "-ar", "48000", "-c:a", "pcm_s16le", sortie],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=True)
+            except Exception:
+                echecs += 1
+                continue
+            _, duree = self._infos_fichier(sortie)
+            self.racine.after(0, lambda i=index, c=chemin, s=sortie, d=duree:
+                              self._remplacer_par_wav(i, c, s, d))
+        self.racine.after(0, lambda: self._fin_conversion(echecs, total))
+
+    def _remplacer_par_wav(self, index, ancien, nouveau, duree):
+        """Remplace dans la playlist le fichier converti et migre ses repères."""
+        if not (0 <= index < len(self.playlist)) or self.playlist[index] != ancien:
+            return  # la playlist a changé entre-temps
+        self.playlist[index] = nouveau
+        if index < len(self.durees):
+            self.durees[index] = duree
+            self._maj_temps_total()
+        # Migration des repères vers le nouveau chemin (valeurs ms conservées)
+        if ancien in self.commentaires:
+            self.commentaires[nouveau] = self.commentaires.pop(ancien)
+            self._sauver_commentaires()
+        self.liste.delete(index)
+        self.liste.insert(index, os.path.basename(nouveau))
+        self._surligner_courant()
+        if index == self.index_courant:
+            self.label_titre.config(text=os.path.basename(nouveau))
+            self._maj_boutons_reperes()
+
+    def _fin_conversion(self, echecs, total):
+        self.bouton_convertir.config(state="normal", text=self._texte_convertir)
+        message = f"{total - echecs}/{total} fichier(s) convertis en WAV 48 kHz."
+        if echecs:
+            message += f"\n\n{echecs} fichier(s) en échec."
+        message += "\n\nPense à revérifier tes repères sur les nouveaux fichiers."
+        self._info("Conversion terminée", message,
+                   accent=ROUGE if echecs else VERT)
+
+    # ------------------------------------------------------------------ #
+    #  Normalisation du pic à -3 dBFS (niveaux homogènes entre morceaux)
+    # ------------------------------------------------------------------ #
+    def normaliser(self):
+        """Normalise le pic de chaque morceau de la playlist à -3 dBFS.
+
+        Mesure le pic réel (ffmpeg volumedetect) puis applique le gain qui amène
+        ce pic à -3 dB (3 dB de marge sous la saturation). Les originaux sont
+        conservés ; chaque sortie est écrite en « _norm.wav » à côté de la
+        source, et remplace la piste dans la playlist.
+        """
+        if not self.playlist:
+            return
+        if not self._demander_oui_non(
+                "Normaliser à -3 dB",
+                f"Normaliser les {len(self.playlist)} fichier(s) de la playlist "
+                "à -3 dB (pic) ?\n\n"
+                "• Les originaux sont conservés (sortie « _norm.wav »).\n"
+                "• Les repères sont copiés sur les nouveaux fichiers.\n"
+                "• Tous les morceaux auront un niveau de pic homogène."):
+            return
+        self.bouton_normaliser.config(state="disabled")
+        fichiers = list(enumerate(self.playlist))
+        threading.Thread(target=self._normaliser_thread,
+                         args=(fichiers,), daemon=True).start()
+
+    def _normaliser_thread(self, fichiers):
+        total = len(fichiers)
+        echecs = 0
+        for rang, (index, chemin) in enumerate(fichiers, start=1):
+            self.racine.after(0, lambda r=rang, t=total:
+                              self.bouton_normaliser.config(
+                                  text=f"Normalisation {r}/{t}…"))
+            sortie = os.path.splitext(chemin)[0] + "_norm.wav"
+            try:
+                gain = self._gain_normalisation(chemin)
+                if gain is None:
+                    echecs += 1
+                    continue
+                subprocess.run(
+                    [self.ffmpeg, "-v", "quiet", "-y", "-i", chemin,
+                     "-af", f"volume={gain:.2f}dB", "-c:a", "pcm_s16le", sortie],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=True)
+            except Exception:
+                echecs += 1
+                continue
+            _, duree = self._infos_fichier(sortie)
+            self.racine.after(0, lambda i=index, c=chemin, s=sortie, d=duree:
+                              self._remplacer_par_wav(i, c, s, d))
+        self.racine.after(0, lambda: self._fin_normalisation(echecs, total))
+
+    def _gain_normalisation(self, chemin, cible=-3.0):
+        """Gain (dB) à appliquer pour amener le pic du fichier à `cible` dBFS.
+
+        Renvoie None si le pic n'a pas pu être mesuré.
+        """
+        res = subprocess.run(
+            [self.ffmpeg, "-hide_banner", "-i", chemin,
+             "-af", "volumedetect", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        texte = res.stderr.decode("utf-8", "ignore")
+        m = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", texte)
+        if not m:
+            return None
+        return cible - float(m.group(1))   # pic actuel -> cible
+
+    def _fin_normalisation(self, echecs, total):
+        self.bouton_normaliser.config(state="normal", text=self._texte_normaliser)
+        message = f"{total - echecs}/{total} fichier(s) normalisés à -3 dB."
+        if echecs:
+            message += f"\n\n{echecs} fichier(s) en échec."
+        self._info("Normalisation terminée", message,
+                   accent=ROUGE if echecs else VERT)
+
+    def _charger_infos_liste(self, elements):
+        """Lit la durée de chaque fichier ajouté (pour le temps total cumulé)."""
+        for index, chemin in elements:
+            _, duree = self._infos_fichier(chemin)
+            self.racine.after(0, lambda i=index, c=chemin, d=duree:
+                              self._maj_duree_liste(i, c, d))
+
+    def _maj_duree_liste(self, index, chemin, duree):
+        """Enregistre la durée d'une piste et met à jour le temps total."""
         if not (0 <= index < len(self.playlist)) or self.playlist[index] != chemin:
             return  # la playlist a changé entre-temps
         if index < len(self.durees):
             self.durees[index] = duree
             self._maj_temps_total()
-        texte = os.path.basename(chemin)
-        if infos:
-            texte += "   —   " + infos
-        selection = self.liste.curselection()
-        self.liste.delete(index)
-        self.liste.insert(index, texte)
-        if index in selection or index == self.index_courant:
-            self.liste.selection_set(index)
 
     def _maj_temps_total(self):
         """Met à jour l'affichage du temps cumulé de la playlist."""
@@ -360,16 +800,45 @@ class LecteurAudio:
             return f"{heures}:{minutes:02d}:{secondes:02d}"
         return f"{minutes:02d}:{secondes:02d}"
 
+    def _autoriser_changement(self, index):
+        """Pendant la lecture, demande confirmation avant de changer de morceau.
+
+        Renvoie True si on peut continuer (rien en lecture, ou l'utilisateur
+        confirme), False sinon. Sur refus, on remet le surlignage sur la piste
+        en cours pour que la sélection ne bouge pas. La réponse est mémorisée
+        ~0,6 s : un double-clic (qui émet simple + double clic sur le même
+        morceau) ne montre ainsi qu'une seule boîte de dialogue.
+        """
+        if not self.player.is_playing():
+            return True
+        maintenant = time.perf_counter()
+        t, idx, reponse = self._derniere_confirmation
+        if idx == index and maintenant - t < 0.6:
+            return reponse   # même morceau, clic très rapproché : on réutilise
+        nom = os.path.basename(self.playlist[index])
+        reponse = self._demander_oui_non(
+            "Changer de morceau",
+            f"Une lecture est en cours.\n\nL'interrompre et passer à :\n{nom} ?")
+        self._derniere_confirmation = (time.perf_counter(), index, reponse)
+        if not reponse:
+            self._surligner_courant()   # annule le changement de sélection
+        return reponse
+
     def _clic_liste(self, evenement):
         """Vrai clic souris sur un fichier : on affiche sa courbe (sans lire)."""
         index = self.liste.nearest(evenement.y)
         if 0 <= index < len(self.playlist) and index != self.index_courant:
-            self._lire_index(index, lire=False)
+            if self._autoriser_changement(index):
+                self._lire_index(index, lire=False)
 
     def _lire_selection(self, evenement=None):
         selection = self.liste.curselection()
-        if selection:
-            self._lire_index(selection[0])
+        if not selection:
+            return
+        index = selection[0]
+        if index != self.index_courant and not self._autoriser_changement(index):
+            return
+        self._lire_index(index)
 
     def _surligner_courant(self):
         """Force le surlignage de la liste sur la piste réellement courante.
@@ -489,9 +958,7 @@ class LecteurAudio:
             duree = self.player.get_length()
             if duree > 0:
                 position_ms = (float(valeur) / 1000) * duree
-                self.label_ecoule.config(text=formate_temps(position_ms))
-                self.label_restant.config(
-                    text=formate_temps(duree - position_ms, negatif=True))
+                self._maj_compteurs(position_ms, duree)
 
     def _fin_glissement(self, evenement):
         # Au relâché, on applique la nouvelle position à la lecture
@@ -503,25 +970,65 @@ class LecteurAudio:
     # ------------------------------------------------------------------ #
     #  Forme d'onde (waveform)
     # ------------------------------------------------------------------ #
+    def _pixel_a_fraction(self, x):
+        """Position pixel sur le canvas -> fraction de piste (0..1), selon le zoom."""
+        largeur = self.canvas_onde.winfo_width()
+        if largeur <= 0:
+            return 0.0
+        return self.zoom_debut + (x / largeur) * (self.zoom_fin - self.zoom_debut)
+
+    def _fraction_au_pixel(self, fraction):
+        """Fraction de piste (0..1) -> position pixel sur le canvas, selon le zoom."""
+        span = self.zoom_fin - self.zoom_debut
+        if span <= 0:
+            return 0.0
+        return (fraction - self.zoom_debut) / span * self.canvas_onde.winfo_width()
+
+    def _zoom_onde(self, evenement):
+        """Molette : zoome/dézoome la forme d'onde autour du curseur souris."""
+        if self.forme_onde is None or self.canvas_onde.winfo_width() <= 1:
+            return "break"
+        ancre = self._pixel_a_fraction(evenement.x)        # point fixe du zoom
+        span = self.zoom_fin - self.zoom_debut
+        facteur = 0.8 if evenement.delta > 0 else 1.25     # molette haut = zoom avant
+        nouveau_span = max(0.001, min(1.0, span * facteur))
+        # On garde le point sous le curseur à la même place à l'écran.
+        ratio = (ancre - self.zoom_debut) / span if span > 0 else 0.5
+        debut = ancre - ratio * nouveau_span
+        fin = debut + nouveau_span
+        if debut < 0:
+            debut, fin = 0.0, nouveau_span
+        if fin > 1:
+            fin, debut = 1.0, 1.0 - nouveau_span
+        self.zoom_debut, self.zoom_fin = max(0.0, debut), min(1.0, fin)
+        self._dessiner_onde()
+        duree = self._duree_courante()
+        if duree > 0:
+            self._maj_curseur_onde(self._derniere_position, duree)
+        return "break"
+
     def _lancer_forme_onde(self, chemin):
         """Vide la courbe et démarre le décodage de la piste en arrière-plan."""
         self.forme_onde = None
+        self.zoom_debut, self.zoom_fin = 0.0, 1.0   # nouvelle piste : zoom à fond
         self.canvas_onde.delete("all")
         self.token_onde += 1
         token = self.token_onde
         threading.Thread(target=self._decoder_forme_onde,
                          args=(chemin, token), daemon=True).start()
 
-    def _decoder_forme_onde(self, chemin, token, resolution=1200):
+    def _decoder_forme_onde(self, chemin, token, resolution=400000):
         """Décode l'audio en mono via ffmpeg et calcule l'enveloppe d'amplitude.
 
         Tourne dans un thread : à la fin, le tracé est replanifié sur le thread
-        principal de tkinter (seul autorisé à toucher aux widgets).
+        principal de tkinter (seul autorisé à toucher aux widgets). La résolution
+        élevée (beaucoup de points) garde une forme d'onde nette même très zoomée.
         """
         try:
-            # ffmpeg -> PCM 16 bits, mono, 8 kHz, écrit sur la sortie standard.
+            # ffmpeg -> PCM 16 bits, mono, 44,1 kHz, écrit sur la sortie standard.
+            # 44,1 kHz : enveloppe très fine, pour un zoom maximal net.
             commande = [self.ffmpeg, "-v", "quiet", "-i", chemin,
-                        "-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
+                        "-ac", "1", "-ar", "44100", "-f", "s16le", "-"]
             brut = subprocess.run(
                 commande, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
@@ -560,8 +1067,15 @@ class LecteurAudio:
             return
         milieu = hauteur / 2
         n = len(cretes)
+        span = self.zoom_fin - self.zoom_debut
         for x in range(largeur):
-            amp = cretes[int(x / largeur * n)] * (milieu - 2)
+            # Plage de crêtes couverte par ce pixel (selon le zoom) : on prend
+            # le maximum pour ne manquer aucune pointe, zoomé comme dézoomé.
+            f0 = self.zoom_debut + (x / largeur) * span
+            f1 = self.zoom_debut + ((x + 1) / largeur) * span
+            i0 = min(n - 1, max(0, int(f0 * n)))
+            i1 = min(n, max(i0 + 1, int(f1 * n)))
+            amp = float(cretes[i0:i1].max()) * (milieu - 2)
             c.create_line(x, milieu - amp, x, milieu + amp,
                           fill=VERT, tags="onde")
         self._dessiner_reperes()
@@ -572,7 +1086,11 @@ class LecteurAudio:
         c.delete("curseur")
         if self.forme_onde is None or duree <= 0:
             return
-        x = (position / duree) * c.winfo_width()
+        self._derniere_position = position
+        fraction = position / duree
+        if fraction < self.zoom_debut or fraction > self.zoom_fin:
+            return   # position hors de la zone visible (zoom) : pas de curseur
+        x = self._fraction_au_pixel(fraction)
         c.create_line(x, 0, x, c.winfo_height(),
                       fill="#ffffff", width=2, tags="curseur")
 
@@ -587,7 +1105,7 @@ class LecteurAudio:
         duree = self._duree_courante()
         if largeur <= 1 or duree <= 0:
             return
-        fraction = max(0.0, min(1.0, evenement.x / largeur))
+        fraction = max(0.0, min(1.0, self._pixel_a_fraction(evenement.x)))
         self._appliquer_position(fraction * duree, duree)
 
     def _appliquer_position(self, position, duree):
@@ -615,9 +1133,7 @@ class LecteurAudio:
             self.horloge_reference = None
         self.barre.set(fraction * 1000)
         self.position_precedente = position   # base propre pour les repères
-        self.label_ecoule.config(text=formate_temps(position))
-        self.label_restant.config(
-            text=formate_temps(duree - position, negatif=True))
+        self._maj_compteurs(position, duree)
         self._maj_curseur_onde(position, duree)
 
     def _aller_a(self, evenement=None):
@@ -634,9 +1150,8 @@ class LecteurAudio:
         self._appliquer_position(position, duree)
         # Propose de poser un cue (repère) à ce temps
         temps = int(max(0, min(position, duree)))
-        if messagebox.askyesno(
-                "Cue", f"Créer un cue à {formate_temps(temps)} ?",
-                parent=self.racine):
+        if self._demander_oui_non(
+                "Cue", f"Créer un cue à {formate_temps(temps)} ?"):
             self._ajouter_repere(temps)
 
     def _parser_temps(self, texte):
@@ -681,9 +1196,12 @@ class LecteurAudio:
         duree = self._duree_courante()
         if duree <= 0 or self.index_courant < 0:
             return
-        largeur, hauteur = c.winfo_width(), c.winfo_height()
+        hauteur = c.winfo_height()
         for cm in self.commentaires.get(self.playlist[self.index_courant], []):
-            x = (cm["temps"] / duree) * largeur
+            fraction = cm["temps"] / duree
+            if fraction < self.zoom_debut or fraction > self.zoom_fin:
+                continue   # repère hors de la zone visible (zoom)
+            x = self._fraction_au_pixel(fraction)
             c.create_line(x, 0, x, hauteur, fill="#ffb300", width=2, tags="repere")
             c.create_polygon(x, 0, x + 12, 5, x, 11,
                              fill="#ffb300", outline="", tags="repere")
@@ -693,9 +1211,8 @@ class LecteurAudio:
         duree = self._duree_courante()
         if duree <= 0:
             return None
-        largeur = self.canvas_onde.winfo_width()
         for cm in self.commentaires.get(self.playlist[self.index_courant], []):
-            if abs(x_clic - (cm["temps"] / duree) * largeur) <= 8:
+            if abs(x_clic - self._fraction_au_pixel(cm["temps"] / duree)) <= 8:
                 return cm
         return None
 
@@ -710,25 +1227,24 @@ class LecteurAudio:
         # Sur un repère existant -> proposer la suppression
         existant = self._repere_proche(evenement.x)
         if existant:
-            if messagebox.askyesno(
+            if self._demander_oui_non(
                     "Supprimer le repère",
                     f"Supprimer ce repère ?\n\n"
                     f"{formate_temps(existant['temps'])}  —  {existant['texte']}",
-                    parent=self.racine):
+                    oui="Supprimer", accent=ROUGE):
                 self._reperes_courants().remove(existant)
                 self._sauver_commentaires()
                 self._dessiner_onde()
                 self._maj_boutons_reperes()
             return
-        # Sinon -> nouveau repère au temps cliqué
-        temps = int(max(0.0, min(1.0, evenement.x / largeur)) * duree)
+        # Sinon -> nouveau repère au temps cliqué (selon le zoom)
+        temps = int(max(0.0, min(1.0, self._pixel_a_fraction(evenement.x))) * duree)
         self._ajouter_repere(temps)
 
     def _ajouter_repere(self, temps):
         """Demande un texte et crée un repère (cue) au temps donné (ms)."""
-        texte = simpledialog.askstring(
-            "Nouveau cue",
-            f"Commentaire à {formate_temps(temps)} :", parent=self.racine)
+        texte = self._demander_texte(
+            "Nouveau cue", f"Commentaire à {formate_temps(temps)} :")
         if texte:
             reperes = self._reperes_courants()
             reperes.append({"temps": temps, "texte": texte})
@@ -746,7 +1262,7 @@ class LecteurAudio:
         reperes = self.commentaires.get(self.playlist[self.index_courant], [])
         if not reperes:
             return
-        police = tkfont.Font(family="Segoe UI", size=9)
+        police = tkfont.Font(family="Segoe UI", size=self._e(9))
         # Largeur disponible (sinon la largeur de la fenêtre avant 1er rendu)
         dispo = self.cadre_reperes.winfo_width()
         if dispo <= 1:
@@ -759,7 +1275,7 @@ class LecteurAudio:
             if len(texte) > 22:
                 texte = texte[:21] + "…"
             libelle = f"{self._formate_total(cm['temps'])} ⟶ {texte}"
-            largeur_btn = police.measure(libelle) + 30  # marges internes + écart
+            largeur_btn = police.measure(libelle) + self._e(30)  # marges + écart
             # Nouvelle ligne si le bouton dépasse la largeur disponible
             if largeur_ligne > 0 and largeur_ligne + largeur_btn > dispo:
                 ligne = tk.Frame(self.cadre_reperes, bg=FOND)
@@ -769,8 +1285,8 @@ class LecteurAudio:
                       command=lambda t=cm["temps"]: self._aller_repere(t),
                       bg=FOND_CLAIR, fg="#ffb300", activebackground="#333333",
                       activeforeground="#ffb300", relief="flat", borderwidth=0,
-                      highlightthickness=0, font=("Segoe UI", 9),
-                      padx=6, pady=2, takefocus=0)
+                      highlightthickness=0, font=("Segoe UI", self._e(9)),
+                      padx=self._e(6), pady=self._e(2), takefocus=0)
             bouton.bind("<space>", self._touche_espace)
             bouton.pack(side="left", padx=3, pady=2)
             largeur_ligne += largeur_btn
@@ -791,7 +1307,7 @@ class LecteurAudio:
         largeur = c.winfo_width()
         px = min(max(evenement.x, 70), largeur - 70)
         t = c.create_text(px, 22, text=cm["texte"], fill="#000000",
-                          font=("Segoe UI", 9, "bold"), tags="infobulle")
+                          font=("Segoe UI", self._e(9), "bold"), tags="infobulle")
         x1, y1, x2, y2 = c.bbox(t)
         c.create_rectangle(x1 - 5, y1 - 3, x2 + 5, y2 + 3,
                            fill="#ffb300", outline="", tags="infobulle")
@@ -951,6 +1467,19 @@ class LecteurAudio:
             # La durée est maintenant connue : on (re)dessine les repères.
             self._dessiner_onde()
 
+    def _maj_compteurs(self, position, duree):
+        """Affiche écoulé et restant de façon cohérente (somme = durée).
+
+        La position est arrondie une seule fois (entier de ms) et le restant en
+        est déduit : les deux compteurs sont ainsi toujours complémentaires
+        (leurs millisecondes totalisent exactement la durée), sans le décalage
+        de 1 ms que produisaient deux troncatures indépendantes.
+        """
+        ecoule = int(max(0, min(position, duree)))
+        self.label_ecoule.config(text=formate_temps(ecoule))
+        self.label_restant.config(
+            text=formate_temps(duree - ecoule, negatif=True))
+
     # ------------------------------------------------------------------ #
     #  Rafraîchissement automatique
     # ------------------------------------------------------------------ #
@@ -983,9 +1512,7 @@ class LecteurAudio:
             if duree > 0:
                 position = min(position, duree)  # ne pas dépasser la fin
                 self.barre.set((position / duree) * 1000)
-                self.label_ecoule.config(text=formate_temps(position))
-                self.label_restant.config(
-                    text=formate_temps(duree - position, negatif=True))
+                self._maj_compteurs(position, duree)
                 self._maj_curseur_onde(position, duree)
                 self._verifier_reperes(position)
         elif not self.player.is_playing():
