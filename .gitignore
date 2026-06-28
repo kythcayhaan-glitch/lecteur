@@ -9,3 +9,6 @@ dist/
 # Cache Python
 __pycache__/
 *.pyc
+
+# Données utilisateur : repères/commentaires posés sur les morceaux
+commentaires.json
