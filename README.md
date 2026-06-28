@@ -1,4 +1,4 @@
-# 🎵 Lecteur Audio
+# 🎵 Kyth Player
 
 Un lecteur audio simple et léger pour Windows, écrit en Python (tkinter + VLC).
 
@@ -16,7 +16,7 @@ Un lecteur audio simple et léger pour Windows, écrit en Python (tkinter + VLC)
 ## Utilisation
 
 ### Version simple (.exe)
-Télécharger `LecteurAudio.exe` et double-cliquer. Aucune installation requise
+Télécharger `KythPlayer.exe` et double-cliquer. Aucune installation requise
 (Python et VLC sont embarqués dans l'exe).
 
 ### Depuis le code source
@@ -32,7 +32,7 @@ python lecteur.py
 
 ```bash
 pip install pyinstaller python-vlc numpy imageio-ffmpeg
-pyinstaller --onefile --windowed --name "LecteurAudio" ^
+pyinstaller --onefile --windowed --name "KythPlayer" ^
   --add-binary "C:\Program Files\VideoLAN\VLC\libvlc.dll;." ^
   --add-binary "C:\Program Files\VideoLAN\VLC\libvlccore.dll;." ^
   --add-data "C:\Program Files\VideoLAN\VLC\plugins;plugins" ^

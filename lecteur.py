@@ -59,7 +59,7 @@ def formate_temps(millisecondes, negatif=False):
 class LecteurAudio:
     def __init__(self, racine):
         self.racine = racine
-        self.racine.title("Lecteur Audio")
+        self.racine.title("Kyth Player")
         self.racine.geometry("460x580")
         self.racine.minsize(420, 520)
         self.racine.configure(bg=FOND)
