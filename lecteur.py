@@ -395,14 +395,27 @@ class LecteurAudio:
         return "break"
 
     def play_pause(self):
-        if self.index_courant == -1 and self.playlist:
+        if not self.playlist:
+            return
+        if self.index_courant == -1:
             self._lire_index(0)
             return
         if self.player.is_playing():
             self.player.pause()
             self.bouton_play.config(text="▶")
-        else:
+        elif self.player.get_state() == vlc.State.Paused:
+            # Reprise depuis la pause : on conserve la position.
             self.player.play()
+            self.bouton_play.config(text="⏸")
+        else:
+            # Arrêté / terminé / chargé sans lecture : on (re)charge
+            # explicitement le média de la piste courante avant de jouer,
+            # pour ne jamais rejouer l'ancien morceau resté en état Ended.
+            self.player.stop()
+            self.player.set_media(
+                self.instance.media_new(self.playlist[self.index_courant]))
+            self.player.play()
+            self.horloge_reference = None
             self.bouton_play.config(text="⏸")
 
     def stop(self):
