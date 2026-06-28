@@ -15,7 +15,7 @@ import sys
 import json
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog, simpledialog, messagebox
+from tkinter import ttk, filedialog, simpledialog, messagebox, font as tkfont
 
 # Quand le programme tourne en .exe (PyInstaller), VLC est embarqué dans le
 # paquet : on indique à python-vlc où trouver libvlc.dll et les plugins.
@@ -680,22 +680,40 @@ class LecteurAudio:
             self._maj_boutons_reperes()
 
     def _maj_boutons_reperes(self):
-        """Reconstruit la rangée de boutons (un par repère de la piste)."""
+        """Reconstruit les boutons de repères, répartis sur plusieurs lignes."""
         for widget in self.cadre_reperes.winfo_children():
             widget.destroy()
         if self.index_courant < 0:
             return
-        for cm in self.commentaires.get(self.playlist[self.index_courant], []):
+        reperes = self.commentaires.get(self.playlist[self.index_courant], [])
+        if not reperes:
+            return
+        police = tkfont.Font(family="Segoe UI", size=9)
+        # Largeur disponible (sinon la largeur de la fenêtre avant 1er rendu)
+        dispo = self.cadre_reperes.winfo_width()
+        if dispo <= 1:
+            dispo = self.racine.winfo_width() - 20
+        ligne = tk.Frame(self.cadre_reperes, bg=FOND)
+        ligne.pack(anchor="center")
+        largeur_ligne = 0
+        for cm in reperes:
             texte = cm["texte"]
-            if len(texte) > 25:
-                texte = texte[:24] + "…"
+            if len(texte) > 22:
+                texte = texte[:21] + "…"
             libelle = f"{self._formate_total(cm['temps'])} ⟶ {texte}"
-            tk.Button(self.cadre_reperes, text=libelle,
+            largeur_btn = police.measure(libelle) + 30  # marges internes + écart
+            # Nouvelle ligne si le bouton dépasse la largeur disponible
+            if largeur_ligne > 0 and largeur_ligne + largeur_btn > dispo:
+                ligne = tk.Frame(self.cadre_reperes, bg=FOND)
+                ligne.pack(anchor="center")
+                largeur_ligne = 0
+            tk.Button(ligne, text=libelle,
                       command=lambda t=cm["temps"]: self._aller_repere(t),
                       bg=FOND_CLAIR, fg="#ffb300", activebackground="#333333",
                       activeforeground="#ffb300", relief="flat", borderwidth=0,
-                      highlightthickness=0, font=("Segoe UI", 11),
-                      padx=8, pady=4).pack(side="left", padx=3)
+                      highlightthickness=0, font=("Segoe UI", 9),
+                      padx=6, pady=2).pack(side="left", padx=3, pady=2)
+            largeur_ligne += largeur_btn
 
     def _aller_repere(self, temps):
         """Va à l'instant du repère (sans effet pendant la lecture)."""
