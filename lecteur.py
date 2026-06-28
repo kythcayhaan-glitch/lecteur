@@ -99,6 +99,13 @@ class LecteurAudio:
         self.duree_actuelle = 0       # durée (ms) de la piste courante (via ffmpeg)
         self.position_precedente = 0  # pour détecter le passage d'un repère
         self._apres_alerte = None     # minuterie qui efface l'alerte affichée
+        self._apres_pulse = None      # minuterie du clignotement plein écran
+        self._pulse_on = False        # clignotement actif ?
+        self._pulse_etat = False      # bascule de couleur du clignotement
+        # Palette parcourue à chaque alerte (une couleur différente à chaque fois)
+        self._couleurs_alerte = ["#e53935", "#1e88e5", "#43a047", "#8e24aa",
+                                 "#fb8c00", "#00897b", "#d81b60", "#3949ab"]
+        self._index_couleur = 0
         self.position_demandee = None # position (0..1) à appliquer au prochain play
 
         # --- Interpolation du temps (pour des millisecondes fluides) ---
@@ -131,11 +138,6 @@ class LecteurAudio:
                                     font=("Segoe UI", 24, "bold"),
                                     bg=FOND, fg=TEXTE)
         self.label_titre.pack(side="left", padx=10)
-
-        self.label_alerte = tk.Label(cadre_haut, text="",
-                                    font=("Segoe UI", 26, "bold"),
-                                    bg=FOND, fg=ROUGE)
-        self.label_alerte.pack(side="left", padx=10)
 
         # --- Playlist ---
         cadre_liste = tk.Frame(self.racine, bg=FOND)
@@ -250,14 +252,32 @@ class LecteurAudio:
         tk.Label(cadre_volume, text="🔊", bg=FOND, fg=TEXTE).pack(side="left")
         self.volume = ttk.Scale(cadre_volume, from_=0, to=100,
                                 orient="horizontal", command=self._sur_volume)
-        self.volume.set(70)
+        self.volume.set(100)
         self.volume.pack(side="left", fill="x", expand=True, padx=6)
-        self.player.audio_set_volume(70)
+        self.player.audio_set_volume(100)
 
         # --- Ajout de fichiers ---
         tk.Button(self.racine, text="➕ Ajouter des fichiers…",
                   command=self.ajouter_fichiers,
                   **style_bouton).pack(pady=(0, 10))
+
+        # --- Overlay d'alerte : fenêtre rouge semi-transparente (cachée) ---
+        # Une Toplevel permet la transparence (attribut -alpha), impossible sur
+        # un simple cadre. On la pose par-dessus la fenêtre pendant le décompte.
+        self.overlay = tk.Toplevel(self.racine)
+        self.overlay.withdraw()
+        self.overlay.overrideredirect(True)        # sans bordure ni barre de titre
+        self.overlay.attributes("-topmost", True)
+        self.overlay.configure(bg="#ff0000")
+        self.overlay.bind("<space>", self._touche_espace)  # garde le play/pause
+        self.label_overlay_texte = tk.Label(
+            self.overlay, text="", fg="#ffffff", bg="#ff0000",
+            font=("Segoe UI", 80, "bold"), wraplength=1500, justify="center")
+        self.label_overlay_texte.pack(pady=(60, 10))
+        self.label_overlay_chiffre = tk.Label(
+            self.overlay, text="", fg="#ffffff", bg="#ff0000",
+            font=("Segoe UI", 150, "bold"))
+        self.label_overlay_chiffre.pack(expand=True)
 
     # ------------------------------------------------------------------ #
     #  Gestion de la playlist
@@ -721,27 +741,56 @@ class LecteurAudio:
         self.position_precedente = position
 
     def _annuler_alerte(self):
-        """Stoppe un décompte/message en cours et vide la zone d'alerte."""
-        if self._apres_alerte is not None:
-            self.racine.after_cancel(self._apres_alerte)
-            self._apres_alerte = None
-        self.label_alerte.config(text="")
+        """Stoppe un décompte/clignotement en cours et masque l'overlay."""
+        self._pulse_on = False
+        for handle in (self._apres_alerte, self._apres_pulse):
+            if handle is not None:
+                self.racine.after_cancel(handle)
+        self._apres_alerte = None
+        self._apres_pulse = None
+        self.overlay.withdraw()
+        self.label_overlay_texte.config(text="")
+        self.label_overlay_chiffre.config(text="")
 
     def _declencher_decompte(self, commentaire):
-        """Affiche 3 · 2 · 1 puis le message, calé sur l'instant du repère."""
+        """Flash coloré semi-transparent + 3·2·1, puis message à l'instant T."""
         self._annuler_alerte()
+        # Une couleur différente à chaque alerte (parcours de la palette)
+        couleur = self._couleurs_alerte[
+            self._index_couleur % len(self._couleurs_alerte)]
+        self._index_couleur += 1
+        for widget in (self.overlay, self.label_overlay_texte,
+                       self.label_overlay_chiffre):
+            widget.config(bg=couleur)
+        # Cale la fenêtre d'overlay exactement sur la fenêtre principale
+        self.racine.update_idletasks()
+        x, y = self.racine.winfo_rootx(), self.racine.winfo_rooty()
+        largeur, hauteur = self.racine.winfo_width(), self.racine.winfo_height()
+        self.overlay.geometry(f"{largeur}x{hauteur}+{x}+{y}")
+        self.overlay.deiconify()
+        self.overlay.lift()
+        self._pulse_on = True
+        self._pulser()
         self._etape_decompte(commentaire, 3)
+
+    def _pulser(self):
+        """Fait clignoter la transparence : on voit le lecteur au travers."""
+        if not self._pulse_on:
+            return
+        self._pulse_etat = not self._pulse_etat
+        self.overlay.attributes("-alpha", 0.55 if self._pulse_etat else 0.12)
+        self._apres_pulse = self.racine.after(280, self._pulser)
 
     def _etape_decompte(self, commentaire, n):
         if n > 0:
-            self.label_alerte.config(text=str(n))
+            # Décompte : commentaire annoncé + gros chiffre
+            self.label_overlay_texte.config(text=f"« {commentaire['texte']} »")
+            self.label_overlay_chiffre.config(text=str(n))
             self._apres_alerte = self.racine.after(
                 1000, lambda: self._etape_decompte(commentaire, n - 1))
         else:
-            # Au temps du repère : on affiche le message, effacé après 6 s
-            self.label_alerte.config(text=commentaire["texte"])
-            self._apres_alerte = self.racine.after(
-                6000, lambda: self.label_alerte.config(text=""))
+            # Instant du repère : on coupe l'alerte aussitôt.
+            self._annuler_alerte()
 
     # ------------------------------------------------------------------ #
     #  Informations du fichier
