@@ -544,6 +544,9 @@ class LecteurAudio:
 
     def _aller_a(self, evenement=None):
         """Saute au temps saisi dans le champ « Aller à : »."""
+        # On rend le focus à la fenêtre : sinon la barre espace s'insère dans
+        # le champ au lieu de relancer la lecture.
+        self.racine.focus_set()
         if self.index_courant < 0:
             return
         position = self._parser_temps(self.champ_aller.get())
