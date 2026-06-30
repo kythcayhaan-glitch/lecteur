@@ -37,6 +37,10 @@ import socket
 import queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
+try:
+    import qrcode                      # QR code de l'URL de la télécommande
+except ImportError:
+    qrcode = None
 import numpy as np
 import imageio_ffmpeg
 
@@ -344,7 +348,7 @@ class LecteurAudio:
         # Télécommande téléphone (réseau local) : serveur web + affichage de l'URL
         self._demarrer_telecommande()
         if self._url_remote:
-            self.label_remote.config(text="📱 " + self._url_remote)
+            self.label_remote.config(text="📱 " + self._url_remote + "   📷 QR")
         else:
             self.label_remote.config(text="📱 télécommande indisponible")
 
@@ -532,10 +536,13 @@ class LecteurAudio:
                                     bg=FOND, fg=TEXTE)
         self.label_titre.pack(side="left", padx=10)
 
-        # Adresse de la télécommande (téléphone sur le réseau local)
+        # Adresse de la télécommande (téléphone sur le réseau local) : cliquer
+        # affiche un QR code à scanner avec le téléphone.
         self.label_remote = tk.Label(cadre_haut, text="", bg=FOND, fg="#9e9e9e",
-                                     font=("Consolas", self._e(11)))
+                                     font=("Consolas", self._e(11)),
+                                     cursor="hand2")
         self.label_remote.pack(side="right", padx=10)
+        self.label_remote.bind("<Button-1>", self._afficher_qr)
 
         # --- Barre de gestion des fichiers (au-dessus de la playlist) ---
         cadre_fichiers = tk.Frame(self.racine, bg=FOND)
@@ -2239,6 +2246,42 @@ class LecteurAudio:
             self._serveur_remote = None   # port occupé : télécommande indisponible
         # Pont : on traite les commandes reçues sur le thread principal de Tk.
         self._boucle_telecommande()
+
+    def _afficher_qr(self, evenement=None):
+        """Affiche un QR code de l'URL de la télécommande (à scanner au tél.)."""
+        if not self._url_remote:
+            return
+        if qrcode is None:    # bibliothèque absente : on montre juste l'URL
+            self._info("Télécommande", self._url_remote)
+            return
+        qr = qrcode.QRCode(border=2)
+        qr.add_data(self._url_remote)
+        qr.make(fit=True)
+        matrice = qr.get_matrix()
+        module = self._e(8)                 # taille d'un module (px)
+        cote = len(matrice) * module
+        top, cadre = self._creer_dialogue("Télécommande — scanne ce QR code", VERT)
+        canvas = tk.Canvas(cadre, width=cote, height=cote, bg="#ffffff",
+                           highlightthickness=0)
+        canvas.pack(padx=self._e(24), pady=(0, self._e(12)))
+        for y, ligne in enumerate(matrice):
+            for x, plein in enumerate(ligne):
+                if plein:
+                    canvas.create_rectangle(x * module, y * module,
+                                            (x + 1) * module, (y + 1) * module,
+                                            fill="#000000", width=0)
+        tk.Label(cadre, text=self._url_remote, bg=FOND_CLAIR, fg=TEXTE,
+                 font=("Consolas", self._e(13))).pack(pady=(0, self._e(4)))
+        tk.Label(cadre, text="Téléphone sur le même Wi‑Fi : scanne, ou tape "
+                 "l'adresse dans le navigateur.", bg=FOND_CLAIR, fg="#9e9e9e",
+                 font=("Segoe UI", self._e(10)), wraplength=cote).pack(
+                 padx=self._e(24), pady=(0, self._e(10)))
+        barre = tk.Frame(cadre, bg=FOND_CLAIR)
+        barre.pack(fill="x", padx=self._e(24), pady=(0, self._e(20)))
+        self._bouton_dialogue(barre, "Fermer", top.destroy,
+                              primaire=True).pack(side="right")
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._placer_dialogue(top)
 
     def _maj_etat_remote(self):
         """Construit l'instantané d'état exposé au téléphone (JSON)."""
