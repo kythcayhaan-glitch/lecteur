@@ -33,6 +33,10 @@ import vlc
 import re
 import subprocess
 import threading
+import socket
+import queue
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, parse_qs
 import numpy as np
 import imageio_ffmpeg
 
@@ -57,6 +61,194 @@ def formate_temps(millisecondes, negatif=False):
     millis = millisecondes % 1000
     signe = "-" if negatif else ""
     return f"{signe}{minutes:02d}:{secondes:02d}.{millis:03d}"
+
+
+# --- Télécommande Android : page web servie sur le réseau local ------------- #
+EXT_AUDIO = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac")
+
+PAGE_REMOTE = """<!doctype html><html lang=fr><head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Kyth Player</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#000;color:#e0e0e0;text-align:center;
+ font-family:'Segoe UI',system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+#titre{font-size:1.4rem;font-weight:700;padding:18px 12px 4px;min-height:1.7rem}
+#temps{color:#9e9e9e;font-variant-numeric:tabular-nums;margin-bottom:10px}
+#barre{height:7px;background:#1a1a1a;margin:0 14px 18px;border-radius:4px;overflow:hidden}
+#prog{height:100%;width:0;background:#00e676}
+.rangee{display:flex;justify-content:center;gap:12px;margin:14px 8px}
+button{background:#1a1a1a;color:#e0e0e0;border:0;border-radius:14px;
+ font-size:1.9rem;padding:18px 0;flex:1;max-width:130px}
+button:active{background:#333}
+#vol{width:90%;margin:14px auto;height:34px}
+#liste{margin:14px 8px 18px;text-align:left}
+.piste{padding:13px 14px;background:#1a1a1a;border-radius:10px;margin:7px 0;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.piste.cur{background:#0f3d29;color:#00e676;font-weight:700}
+.sec{margin:6px 8px 30px;text-align:left}
+.bsec{width:100%;font-size:1.05rem;padding:14px;border-radius:10px;background:#13241c;
+ color:#00e676;font-weight:700}
+#ajout{display:none;margin-top:10px}
+.lg{display:block;width:100%;padding:13px;border-radius:10px;background:#1a1a1a;
+ color:#e0e0e0;margin:8px 0;text-align:center}
+#chemin{color:#9e9e9e;font-size:.8rem;word-break:break-all;margin:8px 2px}
+.nav{padding:12px 14px;background:#1a1a1a;border-radius:9px;margin:6px 0;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav.fichier{color:#00e676}
+#info{color:#9e9e9e;min-height:1.1rem;font-size:.85rem;margin:6px}
+</style></head><body>
+<div id=titre>...</div>
+<div id=temps>00:00 / 00:00</div>
+<div id=barre><div id=prog></div></div>
+<div class=rangee>
+ <button onclick="a('prev')">&#9198;</button>
+ <button id=pp onclick="a('play_pause')">&#9199;</button>
+ <button onclick="a('next')">&#9197;</button>
+ <button onclick="a('stop')">&#9209;</button>
+</div>
+<input id=vol type=range min=0 max=100 value=100 oninput="a('volume',this.value)">
+<div id=liste></div>
+<div class=sec>
+ <button class=bsec onclick="bascule()">&#10133; Ajouter des titres</button>
+ <div id=ajout>
+  <div id=info></div>
+  <label class=lg>Envoyer un fichier du t&eacute;l&eacute;phone
+   <input id=fichier type=file accept="audio/*" style="display:none" onchange="envoyer()"></label>
+  <button class=lg onclick="parcourir('')">&#128193; Parcourir les fichiers du PC</button>
+  <div id=chemin></div>
+  <div id=nav></div>
+ </div>
+</div>
+<script>
+function a(c,v){let u='/action?cmd='+c;if(v!=null)u+='&val='+encodeURIComponent(v);
+ return fetch(u).then(maj)}
+function f(ms){ms=Math.max(0,ms|0);let s=(ms/1000)|0,m=(s/60)|0;s%=60;
+ return (m<10?'0':'')+m+':'+(s<10?'0':'')+s}
+let vg=false,vol=document.getElementById('vol');
+vol.addEventListener('touchstart',()=>vg=true);
+vol.addEventListener('touchend',()=>vg=false);
+vol.addEventListener('mousedown',()=>vg=true);
+vol.addEventListener('mouseup',()=>vg=false);
+function bascule(){let d=document.getElementById('ajout');
+ d.style.display=d.style.display=='block'?'none':'block';}
+function envoyer(){let el=document.getElementById('fichier');let fl=el.files[0];if(!fl)return;
+ let fd=new FormData();fd.append('fichier',fl);info.textContent='Envoi de '+fl.name+'...';
+ fetch('/televerser',{method:'POST',body:fd}).then(r=>r.json()).then(j=>{
+  info.textContent=j.ok?('Ajout\\u00e9 : '+j.nom):'\\u00c9chec de l\\'envoi';el.value='';maj();
+ }).catch(()=>{info.textContent='\\u00c9chec de l\\'envoi';});}
+function parcourir(ch){fetch('/parcourir?chemin='+encodeURIComponent(ch||'')).then(r=>r.json())
+ .then(b=>{let n=document.getElementById('nav');n.innerHTML='';
+  document.getElementById('chemin').textContent=b.chemin||'(lecteurs)';
+  if(b.parent!=null){let u=document.createElement('div');u.className='nav';
+   u.textContent='\\u2B06 ..';u.onclick=()=>parcourir(b.parent);n.appendChild(u);}
+  b.dossiers.forEach(d=>{let e=document.createElement('div');e.className='nav';
+   e.textContent='\\uD83D\\uDCC1 '+d.nom;e.onclick=()=>parcourir(d.chemin);n.appendChild(e);});
+  b.fichiers.forEach(x=>{let e=document.createElement('div');e.className='nav fichier';
+   e.textContent='\\u2795 '+x.nom;e.onclick=()=>{a('ajouter',x.chemin);
+    e.textContent='\\u2714 '+x.nom;};n.appendChild(e);});
+ });}
+function maj(){fetch('/etat').then(r=>r.json()).then(e=>{
+ titre.textContent=e.titre||'Aucune piste';
+ temps.textContent=f(e.position)+' / '+f(e.duree);
+ prog.style.width=(e.duree?100*e.position/e.duree:0)+'%';
+ pp.textContent=e.lecture?'\\u23F8':'\\u25B6';
+ if(!vg)vol.value=e.volume;
+ if(liste.dataset.n!=e.pistes.length){liste.dataset.n=e.pistes.length;liste.innerHTML='';
+  e.pistes.forEach((nom,i)=>{let d=document.createElement('div');
+   d.className='piste';d.textContent=nom;d.onclick=()=>a('lire',i);liste.appendChild(d)})}
+ [...liste.children].forEach((d,i)=>d.classList.toggle('cur',i==e.index));
+}).catch(()=>{})}
+setInterval(maj,700);maj();
+</script></body></html>"""
+
+
+def _extraire_fichier_multipart(ctype, corps):
+    """Extrait (nom_fichier, octets) d'un corps multipart/form-data. (None,None)
+    si rien trouvé. Parse manuel (pas de dépendance, robuste au binaire)."""
+    m = re.search(r"boundary=([^;]+)", ctype)
+    if not m:
+        return None, None
+    sep = ("--" + m.group(1).strip().strip('"')).encode()
+    for partie in corps.split(sep):
+        if b"filename=" not in partie or b"Content-Disposition" not in partie:
+            continue
+        entete, _, donnees = partie.partition(b"\r\n\r\n")
+        fm = re.search(rb'filename="([^"]*)"', entete)
+        if not fm or not fm.group(1):
+            continue
+        if donnees.endswith(b"\r\n"):     # retire le saut avant le prochain bord
+            donnees = donnees[:-2]
+        return fm.group(1).decode("utf-8", "ignore"), donnees
+    return None, None
+
+
+def _faire_handler_remote(app):
+    """Construit la classe de gestion HTTP liée à l'application `app`."""
+    class HandlerRemote(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass  # pas de journal sur la console
+
+        def _envoyer(self, code, corps=b"", ctype="text/html; charset=utf-8"):
+            self.send_response(code)
+            if corps:
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(corps)))
+            self.end_headers()
+            if corps:
+                self.wfile.write(corps)
+
+        def do_GET(self):
+            # Réseau local uniquement : on refuse toute IP non privée.
+            if not LecteurAudio._ip_est_locale(self.client_address[0]):
+                self._envoyer(403)
+                return
+            parties = urlsplit(self.path)
+            if parties.path == "/":
+                self._envoyer(200, PAGE_REMOTE.encode("utf-8"))
+            elif parties.path == "/etat":
+                corps = json.dumps(app._etat_remote).encode("utf-8")
+                self._envoyer(200, corps, "application/json")
+            elif parties.path == "/action":
+                q = parse_qs(parties.query)
+                cmd = q.get("cmd", [""])[0]
+                val = q.get("val", [None])[0]
+                if cmd:
+                    app._commandes_remote.put((cmd, val))
+                self._envoyer(204)
+            elif parties.path == "/parcourir":
+                q = parse_qs(parties.query)
+                chemin = q.get("chemin", [""])[0]
+                corps = json.dumps(app._parcourir_dossier(chemin)).encode("utf-8")
+                self._envoyer(200, corps, "application/json")
+            else:
+                self._envoyer(404)
+
+        def do_POST(self):
+            if not LecteurAudio._ip_est_locale(self.client_address[0]):
+                self._envoyer(403)
+                return
+            if urlsplit(self.path).path != "/televerser":
+                self._envoyer(404)
+                return
+            ctype = self.headers.get("Content-Type", "")
+            longueur = int(self.headers.get("Content-Length", 0) or 0)
+            if "multipart/form-data" not in ctype or longueur <= 0:
+                self._envoyer(400)
+                return
+            nom, donnees = _extraire_fichier_multipart(ctype,
+                                                       self.rfile.read(longueur))
+            chemin = app._enregistrer_recu(nom, donnees) if nom else None
+            if chemin:
+                app._commandes_remote.put(("ajouter", chemin))
+                rep = {"ok": True, "nom": os.path.basename(chemin)}
+            else:
+                rep = {"ok": False}
+            self._envoyer(200, json.dumps(rep).encode("utf-8"),
+                          "application/json")
+    return HandlerRemote
 
 
 class LecteurAudio:
@@ -148,6 +340,13 @@ class LecteurAudio:
 
         self._construire_interface()
         self._maj_boutons_undo()   # ↶ ↷ désactivés tant qu'aucune édition
+
+        # Télécommande téléphone (réseau local) : serveur web + affichage de l'URL
+        self._demarrer_telecommande()
+        if self._url_remote:
+            self.label_remote.config(text="📱 " + self._url_remote)
+        else:
+            self.label_remote.config(text="📱 télécommande indisponible")
 
         # Mise à jour régulière de la barre + compteurs (toutes les 500 ms)
         self._rafraichir()
@@ -332,6 +531,11 @@ class LecteurAudio:
                                     font=("Segoe UI", self._e(24), "bold"),
                                     bg=FOND, fg=TEXTE)
         self.label_titre.pack(side="left", padx=10)
+
+        # Adresse de la télécommande (téléphone sur le réseau local)
+        self.label_remote = tk.Label(cadre_haut, text="", bg=FOND, fg="#9e9e9e",
+                                     font=("Consolas", self._e(11)))
+        self.label_remote.pack(side="right", padx=10)
 
         # --- Barre de gestion des fichiers (au-dessus de la playlist) ---
         cadre_fichiers = tk.Frame(self.racine, bg=FOND)
@@ -1991,6 +2195,175 @@ class LecteurAudio:
         self.label_ecoule.config(text=formate_temps(ecoule))
         self.label_restant.config(
             text=formate_temps(duree - ecoule, negatif=True))
+
+    # ------------------------------------------------------------------ #
+    #  Télécommande (réseau local) : serveur web + pont vers le thread Tk
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _ip_est_locale(ip):
+        """Vrai si l'IP appartient à un réseau privé (réseau local)."""
+        if ip.startswith(("192.168.", "10.", "127.", "169.254.")):
+            return True
+        if ip.startswith("172."):
+            try:
+                return 16 <= int(ip.split(".")[1]) <= 31
+            except (IndexError, ValueError):
+                return False
+        return False
+
+    def _ip_locale(self):
+        """Adresse IP de la machine sur le réseau local (pour l'URL affichée)."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))   # n'envoie rien : donne l'interface sortante
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    def _demarrer_telecommande(self, port=8765):
+        """Démarre le serveur web de télécommande (réseau local uniquement)."""
+        self._commandes_remote = queue.Queue()
+        self._etat_remote = {}
+        self._maj_etat_remote()
+        self._url_remote = None
+        try:
+            self._serveur_remote = ThreadingHTTPServer(
+                ("0.0.0.0", port), _faire_handler_remote(self))
+            self._serveur_remote.daemon_threads = True
+            threading.Thread(target=self._serveur_remote.serve_forever,
+                             daemon=True).start()
+            self._url_remote = f"http://{self._ip_locale()}:{port}"
+        except OSError:
+            self._serveur_remote = None   # port occupé : télécommande indisponible
+        # Pont : on traite les commandes reçues sur le thread principal de Tk.
+        self._boucle_telecommande()
+
+    def _maj_etat_remote(self):
+        """Construit l'instantané d'état exposé au téléphone (JSON)."""
+        titre = "Aucune piste"
+        if 0 <= self.index_courant < len(self.playlist):
+            titre = os.path.basename(self.playlist[self.index_courant])
+        self._etat_remote = {
+            "titre": titre,
+            "lecture": bool(self.player.is_playing()),
+            "position": int(self._derniere_position),
+            "duree": max(0, int(self._duree_courante())),
+            "volume": int(float(self.volume.get())),
+            "index": self.index_courant,
+            "pistes": [os.path.basename(p) for p in self.playlist],
+        }
+
+    def _boucle_telecommande(self):
+        """Exécute les commandes reçues du téléphone sur le thread Tk."""
+        try:
+            while True:
+                cmd, val = self._commandes_remote.get_nowait()
+                self._executer_commande_remote(cmd, val)
+        except queue.Empty:
+            pass
+        self._maj_etat_remote()
+        self.racine.after(200, self._boucle_telecommande)
+
+    def _executer_commande_remote(self, cmd, val):
+        """Applique une commande reçue (sur le thread principal)."""
+        try:
+            if cmd == "play_pause":
+                self.play_pause()
+            elif cmd == "stop":
+                self.stop()
+            elif cmd == "next":
+                self.suivant()
+            elif cmd == "prev":
+                self.precedent()
+            elif cmd == "volume" and val is not None:
+                v = max(0, min(100, int(float(val))))
+                self.volume.set(v)
+                self.player.audio_set_volume(v)
+            elif cmd == "lire" and val is not None:
+                self._lire_index(int(val))
+            elif cmd == "ajouter" and val:
+                self._ajouter_chemin(val)
+        except (ValueError, IndexError):
+            pass
+
+    def _ajouter_chemin(self, chemin):
+        """Ajoute un seul fichier à la playlist (durée calculée en tâche de fond)."""
+        if not chemin or not os.path.isfile(chemin):
+            return False
+        self.playlist.append(chemin)
+        self.durees.append(0)
+        index = len(self.playlist) - 1
+        self.liste.insert("end", os.path.basename(chemin))
+        threading.Thread(target=self._charger_infos_liste,
+                         args=([(index, chemin)],), daemon=True).start()
+        return True
+
+    def _dossier_recus(self):
+        """Dossier où sont enregistrés les fichiers reçus du téléphone."""
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        dossier = os.path.join(base, "Reçus téléphone")
+        try:
+            os.makedirs(dossier, exist_ok=True)
+        except OSError:
+            pass
+        return dossier
+
+    def _enregistrer_recu(self, nom, donnees):
+        """Enregistre un fichier téléversé (nom unique). Renvoie le chemin ou None."""
+        nom = os.path.basename(nom or "")     # sécurité : pas de chemin relatif
+        if not nom or donnees is None:
+            return None
+        chemin = os.path.join(self._dossier_recus(), nom)
+        base, ext = os.path.splitext(chemin)
+        n = 2
+        while os.path.exists(chemin):
+            chemin = f"{base}_{n}{ext}"
+            n += 1
+        try:
+            with open(chemin, "wb") as f:
+                f.write(donnees)
+            return chemin
+        except OSError:
+            return None
+
+    def _parcourir_dossier(self, chemin):
+        """Liste sous-dossiers + fichiers audio d'un répertoire (télécommande).
+
+        Chemin vide = racine : lecteurs du PC + dossier Musique de l'utilisateur.
+        """
+        if not chemin:
+            try:
+                lecteurs = list(os.listdrives())          # Python 3.12+
+            except AttributeError:
+                lecteurs = [f"{c}:\\" for c in "CDEFGHIJKLMNOP"
+                            if os.path.exists(f"{c}:\\")]
+            dossiers = [{"nom": d, "chemin": d} for d in lecteurs]
+            musique = os.path.join(os.path.expanduser("~"), "Music")
+            if os.path.isdir(musique):
+                dossiers.insert(0, {"nom": "Musique", "chemin": musique})
+            return {"chemin": "", "parent": None,
+                    "dossiers": dossiers, "fichiers": []}
+        chemin = os.path.abspath(chemin)
+        dossiers, fichiers = [], []
+        try:
+            for nom in sorted(os.listdir(chemin), key=str.lower):
+                p = os.path.join(chemin, nom)
+                if os.path.isdir(p):
+                    dossiers.append({"nom": nom, "chemin": p})
+                elif nom.lower().endswith(EXT_AUDIO):
+                    fichiers.append({"nom": nom, "chemin": p})
+        except OSError:
+            pass
+        parent = os.path.dirname(chemin)
+        if parent == chemin:                # déjà à la racine d'un lecteur
+            parent = ""
+        return {"chemin": chemin, "parent": parent,
+                "dossiers": dossiers, "fichiers": fichiers}
 
     # ------------------------------------------------------------------ #
     #  Rafraîchissement automatique
