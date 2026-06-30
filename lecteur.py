@@ -56,6 +56,14 @@ VERT_JOUE = "#c75450"   # traits de l'onde déjà lue (rouge atténué) : marque
                         # progression en recolorant la courbe, sans rectangle
 
 
+# --- Version du logiciel ---
+# Format sémantique MAJEUR.MINEUR.CORRECTIF. À incrémenter à chaque
+# « push et compile » ; pense à reporter le même numéro dans version_info.txt
+# (propriétés de l'exe). La date de build affichée vient, elle, de la date du
+# fichier (exe gelé ou source) : elle se met à jour toute seule.
+VERSION = "1.0.0"
+
+
 def formate_temps(millisecondes, negatif=False):
     """Transforme des millisecondes en texte mm:ss.mmm (ou -mm:ss.mmm)."""
     if millisecondes < 0:
@@ -260,7 +268,7 @@ def _faire_handler_remote(app):
 class LecteurAudio:
     def __init__(self, racine):
         self.racine = racine
-        self.racine.title("Kyth Player")
+        self.racine.title(f"Kyth Player v{VERSION}")
 
         # --- Adaptation à la résolution de l'écran ---
         # Toutes les tailles (polices, hauteur de la forme d'onde, fenêtre) sont
@@ -362,6 +370,17 @@ class LecteurAudio:
         self._construire_interface()
         self._maj_boutons_undo()   # ↶ ↷ désactivés tant qu'aucune édition
 
+        # --- Cartouchier (sons déclenchés au clavier, par-dessus la playlist) ---
+        # Chaque cart a son propre lecteur VLC : ils se superposent à la musique
+        # et entre eux, et un ré-appui sur la touche relance le son depuis le
+        # début. N'importe quelle touche du clavier peut être assignée.
+        self.carts = self._charger_carts()
+        self._cart_players = {}      # uid du cart -> lecteur VLC dédié
+        self._cart_boutons = []      # boutons de la grille (alignés sur self.carts)
+        self._render_carts()
+        # Toute touche déclenche le cart associé, sauf pendant une saisie de texte.
+        self.racine.bind("<KeyPress>", self._touche_cart)
+
         # Télécommande téléphone (réseau local) : serveur web + affichage de l'URL
         self._demarrer_telecommande()
         if self._url_remote:
@@ -375,6 +394,18 @@ class LecteurAudio:
     def _e(self, taille):
         """Adapte une taille (police, dimension en px) à la résolution écran."""
         return max(1, int(round(taille * self.echelle)))
+
+    def _date_build(self):
+        """Date de génération du logiciel : date de l'exe gelé (donc du build) ou,
+        en mode source, date de dernière modif de lecteur.py. Sert de repère pour
+        détecter un exe périmé."""
+        try:
+            chemin = (sys.executable if getattr(sys, "frozen", False)
+                      else os.path.abspath(__file__))
+            return time.strftime("%d/%m/%Y %H:%M",
+                                 time.localtime(os.path.getmtime(chemin)))
+        except OSError:
+            return ""
 
     def _basculer_plein_ecran(self, evenement=None):
         """F11 : bascule entre vrai plein écran et fenêtre à 80 %."""
@@ -553,6 +584,13 @@ class LecteurAudio:
                                     bg=FOND, fg=TEXTE)
         self.label_titre.pack(side="left", padx=10)
 
+        # Version + date de build : repère permanent (visible même en plein écran)
+        # pour éviter de tester un exe périmé. La date vient de la date du fichier.
+        self.label_version = tk.Label(
+            cadre_haut, text=f"v{VERSION} · {self._date_build()}", bg=FOND,
+            fg="#6e6e6e", font=("Segoe UI", self._e(10)))
+        self.label_version.pack(side="left", anchor="s", pady=(0, self._e(8)))
+
         # Adresse de la télécommande (téléphone sur le réseau local) : cliquer
         # affiche un QR code à scanner avec le téléphone.
         self.label_remote = tk.Label(cadre_haut, text="", bg=FOND, fg="#9e9e9e",
@@ -610,6 +648,10 @@ class LecteurAudio:
         defilement = tk.Scrollbar(cadre_liste, command=self.liste.yview)
         defilement.pack(side="right", fill="y")
         self.liste.config(yscrollcommand=defilement.set)
+
+        # Cartouchier (colonne du milieu) : grille de sons déclenchés au clavier,
+        # joués par-dessus la musique de la playlist (canal audio séparé).
+        self._construire_cartouchier(cadre_central)
 
         # Timecodes (colonne de droite) : écoulé (vert) au-dessus, restant
         # (rouge) en dessous, empilés et centrés verticalement face à la liste.
@@ -1270,6 +1312,330 @@ class LecteurAudio:
     def precedent(self):
         if self.playlist:
             self._lire_index((self.index_courant - 1) % len(self.playlist))
+
+    # ------------------------------------------------------------------ #
+    #  Cartouchier : sons déclenchés au clavier, par-dessus la playlist
+    # ------------------------------------------------------------------ #
+    def _construire_cartouchier(self, parent):
+        """Panneau du cartouchier (colonne du milieu de la zone centrale)."""
+        cadre = tk.Frame(parent, bg=FOND)
+        cadre.pack(side="left", fill="y", padx=(12, 0))
+        tk.Label(cadre, text="🎛 Cartouchier", bg=FOND, fg=TEXTE,
+                 font=("Segoe UI", self._e(13), "bold")).pack(anchor="w")
+        tk.Label(cadre, text="Une touche du clavier lance le son (par-dessus la "
+                 "musique).\nClic droit sur un cart pour le modifier.",
+                 bg=FOND, fg="#9e9e9e", justify="left",
+                 font=("Segoe UI", self._e(9))).pack(anchor="w", pady=(0, self._e(6)))
+        # Grille des carts (reconstruite à chaque changement par _render_carts).
+        self.cadre_grille_carts = tk.Frame(cadre, bg=FOND)
+        self.cadre_grille_carts.pack(fill="both", expand=True)
+
+    def _style_cart(self):
+        return dict(bg=FOND_CLAIR, fg=TEXTE, activebackground="#333333",
+                    activeforeground=TEXTE, relief="flat", borderwidth=0,
+                    highlightthickness=0, width=16, height=2, justify="center",
+                    cursor="hand2", takefocus=0, wraplength=self._e(150),
+                    font=("Segoe UI", self._e(11)))
+
+    def _afficher_touche(self, keysym):
+        """Nom lisible d'une touche (keysym Tk) pour l'affichage des carts."""
+        if not keysym:
+            return ""
+        speciales = {"Return": "Entrée", "Tab": "Tab", "BackSpace": "Retour",
+                     "Delete": "Suppr", "Insert": "Inser", "Up": "↑", "Down": "↓",
+                     "Left": "←", "Right": "→", "Prior": "PgPréc", "Next": "PgSuiv",
+                     "Home": "Début", "End": "Fin", "plus": "+", "minus": "-",
+                     "comma": ",", "period": ".", "slash": "/", "asterisk": "*",
+                     "semicolon": ";", "Caps_Lock": "Maj", "Menu": "Menu"}
+        if keysym in speciales:
+            return speciales[keysym]
+        if keysym.startswith("KP_"):
+            reste = self._afficher_touche(keysym[3:]) if keysym[3:] else ""
+            return ("Num " + reste).strip()
+        if len(keysym) == 1:
+            return keysym.upper()
+        return keysym
+
+    def _libelle_cart(self, cart):
+        """Texte affiché sur le bouton d'un cart (touche + nom)."""
+        touche = self._afficher_touche(cart.get("touche"))
+        tete = f"[{touche}]" if touche else "[touche ?]"
+        return f"{tete}\n{cart.get('nom', '(sans nom)')}"
+
+    def _render_carts(self):
+        """(Re)construit la grille des carts d'après self.carts."""
+        for w in self.cadre_grille_carts.winfo_children():
+            w.destroy()
+        self._cart_boutons = []
+        cols = 2
+        style = self._style_cart()
+        for i, cart in enumerate(self.carts):
+            bouton = tk.Button(self.cadre_grille_carts,
+                               text=self._libelle_cart(cart),
+                               command=lambda i=i: self._jouer_cart(i), **style)
+            bouton.bind("<Button-3>", lambda e, i=i: self._menu_cart(e, i))
+            bouton.grid(row=i // cols, column=i % cols,
+                        padx=self._e(3), pady=self._e(3))
+            self._cart_boutons.append(bouton)
+        # Bouton « ＋ » pour ajouter un cart, à la suite de la grille.
+        n = len(self.carts)
+        plus = tk.Button(self.cadre_grille_carts, text="＋\nAjouter",
+                         command=self._ajouter_cart, **style)
+        plus.config(fg="#9e9e9e")
+        plus.grid(row=n // cols, column=n % cols,
+                  padx=self._e(3), pady=self._e(3))
+        # La barre espace reste play/pause même si un cart a le focus (clic souris).
+        self._neutraliser_espace(self.cadre_grille_carts)
+
+    def _flash_cart(self, i, couleur=VERT):
+        """Surligne brièvement un cart pour confirmer le déclenchement."""
+        if not (0 <= i < len(self._cart_boutons)):
+            return
+        bouton = self._cart_boutons[i]
+        bouton.config(bg=couleur, fg=FOND)
+
+        def restaurer():
+            try:
+                if bouton.winfo_exists():
+                    bouton.config(bg=FOND_CLAIR, fg=TEXTE)
+            except tk.TclError:
+                pass
+        self.racine.after(170, restaurer)
+
+    def _jouer_cart(self, i):
+        """Déclenche le cart i : lecture par-dessus la musique, depuis le début.
+
+        Chaque cart a son propre lecteur VLC : plusieurs carts peuvent sonner en
+        même temps. Si le cart joue déjà, ré-appuyer sur sa touche l'arrête
+        (bascule lecture / arrêt).
+        """
+        if not (0 <= i < len(self.carts)):
+            return
+        cart = self.carts[i]
+        chemin = cart.get("chemin")
+        if not chemin or not os.path.exists(chemin):
+            self._flash_cart(i, ROUGE)   # fichier introuvable
+            return
+        player = self._cart_players.get(cart["uid"])
+        if player is None:
+            player = self.instance.media_player_new()
+            self._cart_players[cart["uid"]] = player
+        elif player.is_playing():
+            player.stop()                # déjà en lecture : on coupe le son
+            return
+        player.stop()
+        player.set_media(self.instance.media_new(chemin))
+        try:
+            player.audio_set_volume(int(float(self.volume.get())))
+        except (tk.TclError, ValueError):
+            pass
+        player.play()
+        self._flash_cart(i)
+
+    def _arreter_cart(self, i):
+        """Stoppe le son d'un cart en cours de lecture."""
+        if 0 <= i < len(self.carts):
+            player = self._cart_players.get(self.carts[i]["uid"])
+            if player is not None:
+                player.stop()
+
+    def _touche_cart(self, evenement):
+        """Toute touche du clavier déclenche le cart qui lui est associé.
+
+        Ignorée pendant une saisie (champ « Aller à »). La barre espace garde son
+        rôle de lecture/pause (binding plus spécifique, jamais reçu ici).
+        """
+        if isinstance(self.racine.focus_get(), tk.Entry):
+            return
+        keysym = evenement.keysym
+        cle = keysym.lower() if len(keysym) == 1 else keysym
+        for i, cart in enumerate(self.carts):
+            touche = cart.get("touche")
+            if touche and touche == cle:
+                self._jouer_cart(i)
+                return "break"
+
+    def _menu_cart(self, evenement, i):
+        """Menu contextuel (clic droit) d'un cart."""
+        if not (0 <= i < len(self.carts)):
+            return
+        menu = tk.Menu(self.racine, tearoff=0, bg=FOND_CLAIR, fg=TEXTE,
+                       activebackground=VERT, activeforeground=FOND,
+                       borderwidth=0, font=("Segoe UI", self._e(11)))
+        menu.add_command(label="▶  Jouer", command=lambda: self._jouer_cart(i))
+        menu.add_command(label="⏹  Arrêter", command=lambda: self._arreter_cart(i))
+        menu.add_separator()
+        menu.add_command(label="✎  Renommer", command=lambda: self._renommer_cart(i))
+        menu.add_command(label="⌨  Changer la touche",
+                         command=lambda: self._changer_touche_cart(i))
+        menu.add_command(label="🎵  Remplacer le fichier",
+                         command=lambda: self._remplacer_cart(i))
+        menu.add_separator()
+        menu.add_command(label="🗑  Retirer", command=lambda: self._retirer_cart(i))
+        try:
+            menu.tk_popup(evenement.x_root, evenement.y_root)
+        finally:
+            menu.grab_release()
+
+    def _affecter_touche(self, i, touche):
+        """Associe une touche au cart i (en la libérant d'un éventuel autre cart)."""
+        if touche:
+            for j, autre in enumerate(self.carts):
+                if j != i and autre.get("touche") == touche:
+                    autre["touche"] = None
+        self.carts[i]["touche"] = touche
+
+    def _ajouter_cart(self):
+        """Crée un nouveau cart : choix du fichier, du nom, puis de la touche."""
+        chemin = filedialog.askopenfilename(
+            title="Choisir un son pour le cart",
+            filetypes=[("Audio", "*.mp3 *.wav *.flac *.ogg *.m4a *.aac"),
+                       ("Tous les fichiers", "*.*")])
+        if not chemin:
+            return
+        nom = os.path.splitext(os.path.basename(chemin))[0]
+        annule, touche = self._capturer_touche()
+        self.carts.append({"uid": self._prochain_uid(), "nom": nom,
+                           "chemin": chemin, "touche": None})
+        self._affecter_touche(len(self.carts) - 1, None if annule else touche)
+        self._sauver_carts()
+        self._render_carts()
+
+    def _renommer_cart(self, i):
+        if not (0 <= i < len(self.carts)):
+            return
+        nom = self._demander_texte("Renommer le cart", "Nom du cart :",
+                                   defaut=self.carts[i].get("nom", ""))
+        if nom is not None and nom.strip():
+            self.carts[i]["nom"] = nom.strip()
+            self._sauver_carts()
+            self._render_carts()
+
+    def _changer_touche_cart(self, i):
+        if not (0 <= i < len(self.carts)):
+            return
+        annule, touche = self._capturer_touche(self.carts[i].get("touche"))
+        if not annule:
+            self._affecter_touche(i, touche)
+            self._sauver_carts()
+            self._render_carts()
+
+    def _remplacer_cart(self, i):
+        if not (0 <= i < len(self.carts)):
+            return
+        chemin = filedialog.askopenfilename(
+            title="Choisir un autre son pour le cart",
+            filetypes=[("Audio", "*.mp3 *.wav *.flac *.ogg *.m4a *.aac"),
+                       ("Tous les fichiers", "*.*")])
+        if not chemin:
+            return
+        self._arreter_cart(i)
+        self.carts[i]["chemin"] = chemin
+        self._sauver_carts()
+        self._render_carts()
+
+    def _retirer_cart(self, i):
+        if not (0 <= i < len(self.carts)):
+            return
+        if not self._demander_oui_non(
+                "Retirer le cart",
+                f"Retirer ce cart du cartouchier ?\n\n{self.carts[i].get('nom', '')}",
+                oui="Retirer", accent=ROUGE):
+            return
+        uid = self.carts[i]["uid"]
+        player = self._cart_players.pop(uid, None)
+        if player is not None:
+            try:
+                player.stop()
+                player.release()
+            except Exception:
+                pass
+        del self.carts[i]
+        self._sauver_carts()
+        self._render_carts()
+
+    def _capturer_touche(self, actuelle=None):
+        """Dialogue « appuyez sur une touche ». Renvoie (annule, keysym|None).
+
+        annule=True si l'utilisateur a fermé sans choisir (Échap). La barre espace,
+        F11 et Échap sont réservés (lecture / plein écran / annulation).
+        """
+        resultat = {"annule": True, "valeur": None}
+        top, cadre = self._creer_dialogue("Touche du cart", VERT)
+        info = tk.Label(cadre, text="Appuyez sur la touche à associer à ce cart.\n"
+                        "(Échap pour annuler)", bg=FOND_CLAIR, fg=TEXTE,
+                        justify="left", font=("Segoe UI", self._e(12)))
+        info.pack(anchor="w", padx=self._e(24), pady=(0, self._e(10)))
+        apercu = tk.Label(cadre, text=self._afficher_touche(actuelle) or "—",
+                          bg=FOND, fg=VERT, font=("Consolas", self._e(20), "bold"))
+        apercu.pack(fill="x", padx=self._e(24), ipady=self._e(8),
+                    pady=(0, self._e(20)))
+
+        def on_key(evenement):
+            keysym = evenement.keysym
+            if keysym == "Escape":
+                top.destroy()
+                return "break"
+            if keysym in ("space", "F11"):
+                info.config(text="Touche réservée (lecture / plein écran).\n"
+                            "Choisis-en une autre.", fg=ROUGE)
+                return "break"
+            resultat["annule"] = False
+            resultat["valeur"] = keysym.lower() if len(keysym) == 1 else keysym
+            top.destroy()
+            return "break"
+
+        top.bind("<KeyPress>", on_key)
+        self._placer_dialogue(top)
+        self.racine.wait_window(top)
+        return resultat["annule"], resultat["valeur"]
+
+    # ------------------------------------------------------------------ #
+    #  Persistance du cartouchier (carts.json, à côté de l'exe)
+    # ------------------------------------------------------------------ #
+    def _chemin_carts(self):
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base, "carts.json")
+
+    def _charger_carts(self):
+        """Lit carts.json. Chaque cart reçoit un uid stable (pour son lecteur)."""
+        try:
+            with open(self._chemin_carts(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = []
+        carts = []
+        uid_max = 0
+        for c in data if isinstance(data, list) else []:
+            if not isinstance(c, dict):
+                continue
+            uid = c.get("uid")
+            if not isinstance(uid, int):
+                uid_max += 1
+                uid = uid_max
+            else:
+                uid_max = max(uid_max, uid)
+            carts.append({"uid": uid, "nom": c.get("nom", "(sans nom)"),
+                          "chemin": c.get("chemin", ""),
+                          "touche": c.get("touche") or None})
+        self._cart_uid = uid_max
+        return carts
+
+    def _sauver_carts(self):
+        data = [{"uid": c["uid"], "nom": c["nom"], "chemin": c["chemin"],
+                 "touche": c.get("touche")} for c in self.carts]
+        try:
+            with open(self._chemin_carts(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _prochain_uid(self):
+        self._cart_uid = getattr(self, "_cart_uid", 0) + 1
+        return self._cart_uid
 
     # ------------------------------------------------------------------ #
     #  Volume
