@@ -52,6 +52,8 @@ TEXTE = "#e0e0e0"       # gris clair : textes neutres
 VERT = "#00e676"        # compteur écoulé (positif)
 ROUGE = "#ff5252"       # compteur restant (négatif)
 FOND_JOUE = "#5c1a1a"   # fond de la portion déjà lue de la forme d'onde (rouge)
+VERT_JOUE = "#c75450"   # traits de l'onde déjà lue (rouge atténué) : marque la
+                        # progression en recolorant la courbe, sans rectangle
 
 
 def formate_temps(millisecondes, negatif=False):
@@ -306,6 +308,21 @@ class LecteurAudio:
         self.zoom_debut = 0.0
         self.zoom_fin = 1.0
         self._derniere_position = 0  # dernière position dessinée (curseur) en ms
+        # Items persistants du canvas (réutilisés d'une image à l'autre plutôt
+        # que supprimés/recréés) : sinon, à chaque frame, repeindre le rectangle
+        # « déjà lu » 0→x redessinait toute la forme d'onde recouverte, et le
+        # coût grimpait avec la position (lag de plus en plus fort vers la fin).
+        self._id_curseur = None      # trait vertical de lecture
+        # Dernier pixel dessiné : tant qu'il ne change pas, inutile de repeindre
+        # (le curseur n'avance que de ~10 px/s, soit 1 pixel toutes les ~6 frames
+        # à 62 images/s). On évite ainsi 5 repaints inutiles sur 6.
+        self._dernier_px_curseur = None
+        # Progression : ids des deux traits (G/D) par colonne de l'onde, et bord
+        # « déjà lu » en pixels. On recolore en rouge les colonnes franchies au
+        # lieu de poser un rectangle (coût constant au lieu de croître avec la
+        # position).
+        self._cols_onde = []
+        self._px_joue_courant = 0
 
         # --- Repères / commentaires (persistés sur disque) ---
         # {chemin_fichier: [{"temps": ms, "texte": "..."}, ...]}
@@ -854,6 +871,9 @@ class LecteurAudio:
             self.horloge_reference = None
             self.position_demandee = None
             self.canvas_onde.delete("all")
+            self._id_curseur = None       # curseur effacé : à recréer
+            self._cols_onde = []          # traits de l'onde effacés
+            self._px_joue_courant = 0
             self.label_titre.config(text="Aucune piste")
             self.label_infos.config(text="")
             self.label_ecoule.config(text="00:00.000")
@@ -892,6 +912,9 @@ class LecteurAudio:
         self.position_demandee = None
         self.liste.delete(0, "end")
         self.canvas_onde.delete("all")
+        self._id_curseur = None       # curseur effacé : à recréer
+        self._cols_onde = []          # traits de l'onde effacés
+        self._px_joue_courant = 0
         self.label_titre.config(text="Aucune piste")
         self.label_infos.config(text="")
         self.label_ecoule.config(text="00:00.000")
@@ -1171,6 +1194,7 @@ class LecteurAudio:
             self.horloge_reference = None   # nouvelle piste : repartir propre
             self.duree_actuelle = 0         # durée recalculée par le thread infos
             self.position_precedente = 0    # remet à zéro la détection des repères
+            self._derniere_position = 0     # nouvelle piste : onde lue repart à 0
             self.position_demandee = None   # oublie une position cliquée précédente
             self._annuler_alerte()          # stoppe un décompte/alerte en cours
             self.label_titre.config(text=os.path.basename(self.playlist[index]))
@@ -1319,6 +1343,9 @@ class LecteurAudio:
         self.forme_onde = None
         self.zoom_debut, self.zoom_fin = 0.0, 1.0   # nouvelle piste : zoom à fond
         self.canvas_onde.delete("all")
+        self._id_curseur = None       # curseur effacé : à recréer
+        self._cols_onde = []          # traits de l'onde effacés
+        self._px_joue_courant = 0
         self.token_onde += 1
         token = self.token_onde
         threading.Thread(target=self._decoder_forme_onde,
@@ -1380,6 +1407,9 @@ class LecteurAudio:
         """Trace les deux voies (gauche en haut, droite en bas) sur le canvas."""
         c = self.canvas_onde
         c.delete("all")
+        self._id_curseur = None       # curseur effacé : à recréer
+        self._cols_onde = []          # ids des traits par colonne : à reconstruire
+        self._px_joue_courant = 0     # bord « déjà lu » (en pixels) recoloré
         cretes = self.forme_onde
         largeur = c.winfo_width()
         hauteur = c.winfo_height()
@@ -1391,6 +1421,11 @@ class LecteurAudio:
         axe_g = hauteur * 0.25       # axe horizontal de la voie gauche (haut)
         axe_d = hauteur * 0.75       # axe horizontal de la voie droite (bas)
         demi = hauteur * 0.25 - 2    # amplitude max d'une voie
+        # Bord « déjà lu » à recolorer d'emblée (utile après zoom/défilement en
+        # cours de lecture) : les colonnes à gauche de ce pixel naissent en rouge.
+        duree = self._duree_courante()
+        bord_joue = self._fraction_au_pixel(self._derniere_position / duree) \
+            if duree > 0 else 0
         for x in range(largeur):
             # Plage de crêtes couverte par ce pixel (selon le zoom) : on prend
             # le maximum pour ne manquer aucune pointe, zoomé comme dézoomé.
@@ -1400,8 +1435,13 @@ class LecteurAudio:
             i1 = min(n, max(i0 + 1, int(f1 * n)))
             ag = float(gauche[i0:i1].max()) * demi
             ad = float(droite[i0:i1].max()) * demi
-            c.create_line(x, axe_g - ag, x, axe_g + ag, fill=VERT, tags="onde")
-            c.create_line(x, axe_d - ad, x, axe_d + ad, fill=VERT, tags="onde")
+            couleur = VERT_JOUE if x < bord_joue else VERT
+            idg = c.create_line(x, axe_g - ag, x, axe_g + ag, fill=couleur,
+                                tags="onde")
+            idd = c.create_line(x, axe_d - ad, x, axe_d + ad, fill=couleur,
+                                tags="onde")
+            self._cols_onde.append((idg, idd))
+        self._px_joue_courant = max(0, min(largeur, int(bord_joue)))
         # Séparateur central + libellés des voies
         c.create_line(0, hauteur / 2, largeur, hauteur / 2,
                       fill="#333333", tags="onde")
@@ -1414,25 +1454,39 @@ class LecteurAudio:
         self._dessiner_selection()      # zone d'édition sélectionnée (par-dessus)
 
     def _dessiner_partie_jouee(self):
-        """Teinte le fond de la portion déjà lue (à gauche du marqueur).
+        """Recolore en rouge les traits de l'onde déjà lus (jauge de progression).
 
-        Rectangle placé sous la courbe et les repères, de la durée 0 jusqu'à la
-        position courante. Sert de jauge de progression visuelle.
+        Au lieu de poser un grand rectangle redessiné à chaque image — qui
+        forçait Tk à repeindre tous les traits recouverts (coût croissant avec
+        la position) — on ne retouche que les quelques colonnes franchies depuis
+        la dernière image : coût constant, indépendant de l'avancement.
         """
         c = self.canvas_onde
-        c.delete("joue")
-        duree = self._duree_courante()
-        if self.forme_onde is None or duree <= 0:
+        if self.forme_onde is None or not self._cols_onde:
             return
-        fraction = self._derniere_position / duree
-        if fraction <= self.zoom_debut:
-            return   # rien de lu n'est visible dans la fenêtre zoomée
-        largeur = c.winfo_width()
-        x = largeur if fraction >= self.zoom_fin else self._fraction_au_pixel(fraction)
-        if x > 0:
-            c.create_rectangle(0, 0, x, c.winfo_height(),
-                               fill=FOND_JOUE, width=0, tags="joue")
-            c.tag_lower("joue")   # derrière la courbe et les repères
+        duree = self._duree_courante()
+        if duree <= 0:
+            return
+        largeur = len(self._cols_onde)
+        # Bord « déjà lu » en pixels dans la vue courante (selon le zoom).
+        bord = max(0, min(largeur,
+                          int(self._fraction_au_pixel(
+                              self._derniere_position / duree))))
+        if bord == self._px_joue_courant:
+            return   # aucune colonne franchie depuis la dernière image
+        if bord > self._px_joue_courant:
+            # On avance : les nouvelles colonnes passent au rouge.
+            for x in range(self._px_joue_courant, bord):
+                idg, idd = self._cols_onde[x]
+                c.itemconfig(idg, fill=VERT_JOUE)
+                c.itemconfig(idd, fill=VERT_JOUE)
+        else:
+            # On recule (clic arrière, boucle A-B) : retour au vert.
+            for x in range(bord, self._px_joue_courant):
+                idg, idd = self._cols_onde[x]
+                c.itemconfig(idg, fill=VERT)
+                c.itemconfig(idd, fill=VERT)
+        self._px_joue_courant = bord
 
     # ------------------------------------------------------------------ #
     #  Sélection d'une zone sur la forme d'onde (pour l'édition)
@@ -1760,7 +1814,7 @@ class LecteurAudio:
         """Déplace le trait vertical de lecture sur la forme d'onde."""
         c = self.canvas_onde
         if self.forme_onde is None or duree <= 0:
-            c.delete("curseur")
+            self._effacer_curseur()
             return
         self._derniere_position = position
         fraction = position / duree
@@ -1777,12 +1831,28 @@ class LecteurAudio:
             self._dessiner_onde()   # redessine la courbe (et efface le curseur)
             hors_champ = False
         self._dessiner_partie_jouee()   # met à jour la teinte de progression
-        c.delete("curseur")
         if hors_champ:
+            self._effacer_curseur()
             return   # position hors de la zone visible (zoom) : pas de curseur
-        x = self._fraction_au_pixel(fraction)
-        c.create_line(x, 0, x, c.winfo_height(),
-                      fill="#ffffff", width=2, tags="curseur")
+        # Trait réutilisé d'une image à l'autre : on ne fait que le déplacer
+        # (coords) au lieu de le supprimer/recréer, pour ne repeindre qu'une
+        # fine bande au lieu de toute la zone du curseur à chaque frame.
+        x = int(self._fraction_au_pixel(fraction))
+        if self._id_curseur is not None and x == self._dernier_px_curseur:
+            return   # même pixel qu'à la dernière image : trait déjà au bon endroit
+        self._dernier_px_curseur = x
+        h = c.winfo_height()
+        if self._id_curseur is None:
+            self._id_curseur = c.create_line(x, 0, x, h, fill="#ffffff",
+                                              width=2, tags="curseur")
+        else:
+            c.coords(self._id_curseur, x, 0, x, h)
+
+    def _effacer_curseur(self):
+        """Retire le trait de lecture s'il existe (hors champ, pas de piste)."""
+        if self._id_curseur is not None:
+            self.canvas_onde.delete(self._id_curseur)
+            self._id_curseur = None
 
     def _clic_onde(self, evenement):
         """Place le curseur à l'endroit cliqué (désactivé pendant la lecture).
