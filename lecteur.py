@@ -146,10 +146,6 @@ class LecteurAudio:
         self._refait = []        # pile pour le rétablissement (redo)
         self._edition_en_cours = False
 
-        # --- VU-mètre (niveaux G/D, colonne de gauche) ---
-        self._vu_g = 0.0         # niveau affiché gauche (avec retombée)
-        self._vu_d = 0.0         # niveau affiché droite
-
         self._construire_interface()
         self._maj_boutons_undo()   # ↶ ↷ désactivés tant qu'aucune édition
 
@@ -328,13 +324,6 @@ class LecteurAudio:
                             font=("Segoe UI", self._e(18)), padx=self._e(8),
                             pady=self._e(6))
 
-        # --- VU-mètre vertical (niveaux G/D), tout à droite, pleine hauteur ---
-        self.canvas_vu = tk.Canvas(self.racine, width=self._e(56), bg=FOND,
-                                   highlightthickness=0)
-        self.canvas_vu.pack(side="right", fill="y")
-        self.canvas_vu.bind("<Configure>",
-                            lambda e: self._maj_vumetre(self._vu_g, self._vu_d))
-
         # --- Barre du haut : titre + alerte de repère (en grand, en rouge) ---
         cadre_haut = tk.Frame(self.racine, bg=FOND)
         cadre_haut.pack(fill="x", pady=(10, 4))
@@ -464,6 +453,15 @@ class LecteurAudio:
         tk.Button(cadre_edition, text="✖ Sél.",
                   command=self._effacer_selection,
                   **style_edit).pack(side="left", padx=(12, 3))
+        # Boucle A-B : reboucle la lecture sur la zone sélectionnée
+        self.boucle_ab = tk.BooleanVar(value=False)
+        tk.Checkbutton(cadre_edition, text="🔁 Boucle A‑B",
+                  variable=self.boucle_ab, command=self._basculer_boucle_ab,
+                  indicatoron=False, bg=FOND_CLAIR, fg=TEXTE, selectcolor=VERT,
+                  activebackground="#333333", activeforeground=TEXTE,
+                  relief="flat", borderwidth=0, highlightthickness=0,
+                  offrelief="flat", font=("Segoe UI", self._e(15)),
+                  padx=self._e(8), pady=self._e(4)).pack(side="left", padx=(12, 3))
         self.bouton_undo = tk.Button(cadre_edition, text="↶",
                   command=self.annuler_edition, **style_edit)
         self.bouton_undo.pack(side="left", padx=(12, 3))
@@ -1142,13 +1140,13 @@ class LecteurAudio:
             voies = []
             for canal in range(2):
                 amplitudes = np.abs(paires[:, canal].astype(np.float32))
-                # On regroupe en `resolution` colonnes (crête de chaque colonne)
-                taille = (amplitudes.size // resolution) * resolution
-                if taille == 0:
-                    voies.append(amplitudes)
-                else:
-                    voies.append(
-                        amplitudes[:taille].reshape(resolution, -1).max(axis=1))
+                # Réduction en colonnes de crête couvrant TOUT le fichier (sans
+                # rien tronquer, sinon la courbe « manque » sa fin et le curseur,
+                # calé sur la durée totale, prend un retard croissant).
+                n_cols = min(resolution, amplitudes.size)
+                bornes = np.linspace(0, amplitudes.size, n_cols,
+                                     endpoint=False).astype(np.intp)
+                voies.append(np.maximum.reduceat(amplitudes, bornes))
             # Normalisation commune aux deux voies (préserve l'équilibre G/D)
             maxi = max(float(voies[0].max()), float(voies[1].max()))
             if maxi > 0:
@@ -1203,76 +1201,6 @@ class LecteurAudio:
         self._dessiner_reperes()
         self._dessiner_partie_jouee()   # teinte le fond déjà lu (sous la courbe)
         self._dessiner_selection()      # zone d'édition sélectionnée (par-dessus)
-
-    # ------------------------------------------------------------------ #
-    #  VU-mètre (niveaux G/D)
-    # ------------------------------------------------------------------ #
-    def _niveau_courant(self):
-        """Niveau crête (0..1) des voies G/D à la position de lecture.
-
-        Lu dans l'enveloppe décodée, sur une petite fenêtre (~80 ms) autour du
-        curseur pour un affichage stable. Renvoie (gauche, droite).
-        """
-        cretes = self.forme_onde
-        duree = self._duree_courante()
-        if cretes is None or duree <= 0:
-            return 0.0, 0.0
-        n = cretes.shape[1]
-        frac = max(0.0, min(1.0, self._derniere_position / duree))
-        i = min(n - 1, int(frac * n))
-        ms_par_col = duree / n
-        fenetre = max(1, int(5 / ms_par_col)) if ms_par_col > 0 else 1
-        i0 = max(0, i - fenetre)
-        g = float(cretes[0, i0:i + 1].max())
-        d = float(cretes[1, i0:i + 1].max())
-        return g, d
-
-    def _maj_vumetre(self, g, d):
-        """Dessine deux barres verticales (G/D) avec zones vert/jaune/rouge."""
-        c = self.canvas_vu
-        c.delete("all")
-        largeur = c.winfo_width()
-        hauteur = c.winfo_height()
-        if largeur <= 1 or hauteur <= 1:
-            return
-        marge = self._e(5)
-        etiquette = self._e(16)            # bandeau du bas pour les lettres G/D
-        haut = marge
-        bas = hauteur - marge - etiquette
-        utile = max(1, bas - haut)
-        bw = (largeur - 3 * marge) / 2
-        for idx, (niveau, lettre) in enumerate(((g, "G"), (d, "D"))):
-            x0 = marge + idx * (bw + marge)
-            x1 = x0 + bw
-            # Fond de la barre
-            c.create_rectangle(x0, haut, x1, bas, fill=FOND_CLAIR, width=0)
-            niveau = max(0.0, min(1.0, niveau))
-            # Zones colorées empilées depuis le bas, clippées au niveau courant
-            seuils = ((0.70, VERT), (0.90, "#ffb300"), (1.00, ROUGE))
-            precedent = 0.0
-            for seuil, couleur in seuils:
-                if niveau <= precedent:
-                    break
-                hauteur_zone = min(niveau, seuil) - precedent
-                y_bas = bas - utile * precedent
-                y_haut = bas - utile * (precedent + hauteur_zone)
-                c.create_rectangle(x0, y_haut, x1, y_bas, fill=couleur, width=0)
-                precedent = seuil
-            # Lettre de la voie sous la barre
-            c.create_text((x0 + x1) / 2, hauteur - marge - etiquette / 2,
-                          text=lettre, fill="#9e9e9e",
-                          font=("Segoe UI", self._e(11), "bold"))
-
-    def _animer_vumetre(self, joue):
-        """Met à jour les niveaux (attaque immédiate, retombée progressive)."""
-        if joue:
-            g, d = self._niveau_courant()
-        else:
-            g = d = 0.0
-        # Attaque instantanée vers le haut, retombée rapide vers le bas
-        self._vu_g = max(g, self._vu_g * 0.70)
-        self._vu_d = max(d, self._vu_d * 0.70)
-        self._maj_vumetre(self._vu_g, self._vu_d)
 
     def _dessiner_partie_jouee(self):
         """Teinte le fond de la portion déjà lue (à gauche du marqueur).
@@ -1335,10 +1263,35 @@ class LecteurAudio:
         return "break"
 
     def _effacer_selection(self):
-        """Annule la sélection courante."""
+        """Annule la sélection courante (et la boucle A-B qui en dépend)."""
         self.sel_a = self.sel_b = None
+        if self.boucle_ab.get():
+            self.boucle_ab.set(False)
         self._dessiner_selection()
         self._maj_label_selection()
+
+    def _basculer_boucle_ab(self):
+        """Active/désactive la boucle A-B (sur la zone sélectionnée).
+
+        À l'activation, exige une sélection valide (A→B) ; sinon on prévient et
+        on décoche. Si on lit déjà au-delà de B, on revient aussitôt à A.
+        """
+        if not self.boucle_ab.get():
+            return
+        if self.sel_a is None or self.sel_b is None or \
+                abs(self.sel_b - self.sel_a) < 1:
+            self.boucle_ab.set(False)
+            self._info("Boucle A-B",
+                       "Sélectionne d'abord une zone (Shift + glisser sur la "
+                       "courbe) : elle sert de points A et B.", accent=ROUGE)
+            return
+        a = min(self.sel_a, self.sel_b)
+        if self.player.is_playing() and self.player.get_time() >= max(
+                self.sel_a, self.sel_b):
+            self.player.set_time(int(a))
+            self.dernier_temps_vlc = int(a)
+            self.temps_reference = a
+            self.horloge_reference = time.perf_counter()
 
     def _maj_label_selection(self):
         """Affiche la plage sélectionnée à côté des boutons d'édition."""
@@ -1705,9 +1658,15 @@ class LecteurAudio:
     #  Repères / commentaires sur la forme d'onde
     # ------------------------------------------------------------------ #
     def _duree_courante(self):
-        """Durée de la piste (ms) : VLC si dispo, sinon valeur ffmpeg."""
-        duree = self.player.get_length()
-        return duree if duree > 0 else self.duree_actuelle
+        """Durée de la piste (ms) : valeur ffmpeg (fidèle) en priorité.
+
+        `get_length()` de VLC est une estimation peu fiable sur les MP3 (VBR) :
+        le curseur, calé sur position/durée, dérivait alors de plus en plus.
+        La durée mesurée par ffmpeg (duree_actuelle) est exacte ; on l'utilise
+        dès qu'elle est connue et on ne retombe sur VLC qu'en attendant.
+        """
+        return self.duree_actuelle if self.duree_actuelle > 0 \
+            else self.player.get_length()
 
     def _reperes_courants(self):
         """Liste des repères de la piste en cours (créée si absente)."""
@@ -1735,7 +1694,7 @@ class LecteurAudio:
     def _repere_proche(self, x_clic):
         """Renvoie le repère dont le drapeau est à <8 px du clic, sinon None."""
         duree = self._duree_courante()
-        if duree <= 0:
+        if duree <= 0 or self.index_courant < 0:
             return None
         for cm in self.commentaires.get(self.playlist[self.index_courant], []):
             if abs(x_clic - self._fraction_au_pixel(cm["temps"] / duree)) <= 8:
@@ -2062,11 +2021,25 @@ class LecteurAudio:
             else:
                 position = temps_vlc
 
-            if duree > 0:
-                position = min(position, duree)  # ne pas dépasser la fin
-                self.barre.set((position / duree) * 1000)
-                self._maj_compteurs(position, duree)
-                self._maj_curseur_onde(position, duree)
+            # Affichage calé sur la durée FIDÈLE (ffmpeg) : get_length() de VLC
+            # surestime les MP3 (VBR) et faisait dériver le curseur. get_time()
+            # avance en temps réel, donc position/duree_fidele reste aligné.
+            duree_aff = self._duree_courante()
+            if duree_aff > 0:
+                position = min(position, duree_aff)  # ne pas dépasser la fin
+                # Boucle A-B : dès qu'on atteint B, on revient au point A.
+                if (self.boucle_ab.get() and self.sel_a is not None
+                        and self.sel_b is not None):
+                    a, b = sorted((self.sel_a, self.sel_b))
+                    if b - a >= 1 and position >= b:
+                        self.player.set_time(int(a))
+                        self.dernier_temps_vlc = int(a)
+                        self.temps_reference = a
+                        self.horloge_reference = time.perf_counter()
+                        position = a
+                self.barre.set((position / duree_aff) * 1000)
+                self._maj_compteurs(position, duree_aff)
+                self._maj_curseur_onde(position, duree_aff)
                 self._verifier_reperes(position)
         elif not self.player.is_playing():
             # En pause/arrêt : on coupe l'interpolation pour repartir propre.
@@ -2075,9 +2048,6 @@ class LecteurAudio:
             temps = self.player.get_time()
             if temps >= 0:
                 self.position_precedente = temps
-
-        # VU-mètre : niveaux G/D à chaque frame (retombée même à l'arrêt)
-        self._animer_vumetre(self.player.is_playing())
 
         # Fin de morceau : on passe à la piste suivante, UNE seule fois.
         # L'état Ended persiste plusieurs frames : on ne réagit qu'à la
