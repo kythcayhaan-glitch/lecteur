@@ -1033,6 +1033,12 @@ class LecteurAudio:
         if index == self.index_courant:
             self.label_titre.config(text=os.path.basename(nouveau))
             self._maj_boutons_reperes()
+            # La piste affichée vient d'être remplacée par sa version _norm.wav :
+            # on redécode la forme d'onde du nouveau fichier, sinon le canvas
+            # garde la courbe de l'ancien (le tracé étant calé sur le pic, le
+            # changement de niveau reste invisible, mais la courbe doit refléter
+            # le fichier réellement en place).
+            self._lancer_forme_onde(nouveau)
 
     def _fin_conversion(self, echecs, total):
         self.bouton_convertir.config(state="normal", text=self._texte_convertir)
