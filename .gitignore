@@ -16,5 +16,8 @@ commentaires.json
 # Données utilisateur : carts du cartouchier (chemins locaux + touches)
 carts.json
 
+# Données utilisateur : boucles A-B enregistrées sur les morceaux
+boucles.json
+
 # Fichiers reçus depuis le téléphone (télécommande) : enregistrés au runtime
 Reçus téléphone/
