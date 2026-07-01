@@ -47,16 +47,68 @@ import numpy as np
 import imageio_ffmpeg
 
 
-# --- Palette de couleurs (thème gris, façon tableau de bord domotique) ---
-FOND = "#262626"        # gris foncé : fond général du lecteur
-FOND_CLAIR = "#3a3a3a"  # gris moyen : cartes / panneaux / listes
-FOND_CART = "#4d4d4d"   # gris plus clair : boutons des carts (contraste sur le
-                        # panneau du cartouchier, lui-même en FOND_CLAIR)
-SURVOL_CLAIR = "#4a4a4a"  # survol des éléments posés sur FOND_CLAIR
-APPUI_CLAIR = "#2a2a2a"    # appui des éléments posés sur FOND_CLAIR
+# --- Thèmes : fond (gris façon tableau de bord / noir d'origine) et couleur
+# d'accent, choisis par l'utilisateur (menu Thème) et persistés dans
+# theme.json à côté du script/exe. Pris en compte au prochain lancement
+# (beaucoup de couleurs ci-dessous servent de valeurs par défaut de paramètres,
+# figées à la définition des méthodes : un changement à chaud ne les
+# toucherait pas toutes, d'où le rechargement seulement au démarrage).
+THEMES_FOND = {
+    "gris": {"FOND": "#262626", "FOND_CLAIR": "#3a3a3a", "FOND_CART": "#4d4d4d",
+             "SURVOL_CLAIR": "#4a4a4a", "APPUI_CLAIR": "#2a2a2a"},
+    "noir": {"FOND": "#000000", "FOND_CLAIR": "#1a1a1a", "FOND_CART": "#333333",
+             "SURVOL_CLAIR": "#2d2d2d", "APPUI_CLAIR": "#101010"},
+}
+THEMES_ACCENT = {
+    "vert": "#00e676",
+    "bleu": "#2979ff",
+    "orange": "#ff9100",
+    "violet": "#b388ff",
+}
+
+
+def _chemin_theme():
+    """Fichier JSON du thème choisi, à côté du script (ou de l'exe)."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "theme.json")
+
+
+def _charger_theme():
+    try:
+        with open(_chemin_theme(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    fond = data.get("fond") if data.get("fond") in THEMES_FOND else "gris"
+    accent = data.get("accent") if data.get("accent") in THEMES_ACCENT else "vert"
+    return fond, accent
+
+
+def _sauver_theme(fond, accent):
+    try:
+        with open(_chemin_theme(), "w", encoding="utf-8") as f:
+            json.dump({"fond": fond, "accent": accent}, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+THEME_FOND, THEME_ACCENT = _charger_theme()
+_palette_fond = THEMES_FOND[THEME_FOND]
+
+# --- Palette de couleurs (calculée d'après le thème choisi ci-dessus) ---
+FOND = _palette_fond["FOND"]              # fond général du lecteur
+FOND_CLAIR = _palette_fond["FOND_CLAIR"]  # cartes / panneaux / listes
+FOND_CART = _palette_fond["FOND_CART"]    # boutons des carts (contraste sur le
+                                          # panneau du cartouchier, lui-même en FOND_CLAIR)
+SURVOL_CLAIR = _palette_fond["SURVOL_CLAIR"]  # survol des éléments sur FOND_CLAIR
+APPUI_CLAIR = _palette_fond["APPUI_CLAIR"]    # appui des éléments sur FOND_CLAIR
 TEXTE = "#e0e0e0"       # gris clair : textes neutres
-VERT = "#00e676"        # compteur écoulé (positif)
-ROUGE = "#ff5252"       # compteur restant (négatif)
+VERT = THEMES_ACCENT[THEME_ACCENT]  # couleur d'accent (compteur écoulé, etc.)
+ROUGE = "#ff5252"       # compteur restant (négatif) : toujours rouge, quel que
+                        # soit l'accent (sémantique de négatif/erreur)
 FOND_JOUE = "#5c1a1a"   # fond de la portion déjà lue de la forme d'onde (rouge)
 VERT_JOUE = "#c75450"   # traits de l'onde déjà lue (rouge atténué) : marque la
                         # progression en recolorant la courbe, sans rectangle
@@ -67,7 +119,7 @@ VERT_JOUE = "#c75450"   # traits de l'onde déjà lue (rouge atténué) : marque
 # « push et compile » ; pense à reporter le même numéro dans version_info.txt
 # (propriétés de l'exe). La date de build affichée vient, elle, de la date du
 # fichier (exe gelé ou source) : elle se met à jour toute seule.
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 class _BoutonCanvasBase(tk.Canvas):
@@ -817,6 +869,70 @@ class LecteurAudio:
         top.grab_set()
         top.focus_force()
 
+    def _changer_theme(self):
+        """Dialogue de choix du thème (fond + accent), pris en compte au
+        prochain lancement (beaucoup de couleurs sont figées à la
+        construction des widgets, un changement à chaud ne serait pas fiable)."""
+        top, cadre = self._creer_dialogue("Thème", VERT)
+        tk.Label(cadre, text="S'applique au prochain lancement de l'application.",
+                 bg=FOND_CLAIR, fg="#9e9e9e", font=("Segoe UI", self._e(11))).pack(
+                 anchor="w", padx=self._e(24), pady=(0, self._e(16)))
+
+        var_fond = tk.StringVar(value=THEME_FOND)
+        var_accent = tk.StringVar(value=THEME_ACCENT)
+
+        def ligne_fond():
+            tk.Label(cadre, text="Fond", bg=FOND_CLAIR, fg=TEXTE,
+                     font=("Segoe UI", self._e(12), "bold")).pack(
+                     anchor="w", padx=self._e(24))
+            ligne = tk.Frame(cadre, bg=FOND_CLAIR)
+            ligne.pack(fill="x", padx=self._e(24), pady=(self._e(6), self._e(16)))
+            for valeur, libelle in (("gris", "Gris"), ("noir", "Noir")):
+                tk.Radiobutton(
+                    ligne, text=libelle, variable=var_fond, value=valeur,
+                    indicatoron=False, bg=FOND_CART, fg=TEXTE, selectcolor=VERT,
+                    activebackground=SURVOL_CLAIR, activeforeground=TEXTE,
+                    relief="flat", borderwidth=0, highlightthickness=0,
+                    cursor="hand2", offrelief="flat",
+                    font=("Segoe UI", self._e(12)),
+                    padx=self._e(16), pady=self._e(8)).pack(side="left", padx=(0, 8))
+
+        def ligne_accent():
+            tk.Label(cadre, text="Accent", bg=FOND_CLAIR, fg=TEXTE,
+                     font=("Segoe UI", self._e(12), "bold")).pack(
+                     anchor="w", padx=self._e(24))
+            ligne = tk.Frame(cadre, bg=FOND_CLAIR)
+            ligne.pack(fill="x", padx=self._e(24), pady=(self._e(6), self._e(20)))
+            for valeur, libelle in (("vert", "Vert"), ("bleu", "Bleu"),
+                                    ("orange", "Orange"), ("violet", "Violet")):
+                couleur = THEMES_ACCENT[valeur]
+                tk.Radiobutton(
+                    ligne, text=libelle, variable=var_accent, value=valeur,
+                    indicatoron=False, bg=self._assombrir(couleur, 0.55), fg=FOND,
+                    selectcolor=couleur, activebackground=self._eclaircir(couleur),
+                    activeforeground=FOND, relief="flat", borderwidth=0,
+                    highlightthickness=0, cursor="hand2", offrelief="flat",
+                    font=("Segoe UI", self._e(12), "bold"),
+                    padx=self._e(14), pady=self._e(8)).pack(side="left", padx=(0, 8))
+
+        ligne_fond()
+        ligne_accent()
+
+        def valider():
+            _sauver_theme(var_fond.get(), var_accent.get())
+            top.destroy()
+            self._info("Thème enregistré",
+                       "Relance l'application pour voir le nouveau thème.")
+
+        barre = tk.Frame(cadre, bg=FOND_CLAIR)
+        barre.pack(fill="x", padx=self._e(24), pady=(0, self._e(20)))
+        self._bouton_dialogue(barre, "Annuler", top.destroy).pack(
+            side="right", padx=(self._e(10), 0))
+        self._bouton_dialogue(barre, "Enregistrer", valider,
+                              primaire=True).pack(side="right")
+        top.bind("<Escape>", lambda e: top.destroy())
+        self._placer_dialogue(top)
+
     def _demander_oui_non(self, titre, message, oui="Oui", non="Non",
                           accent=VERT):
         """Confirmation Oui/Non façon thème sombre. Renvoie True/False."""
@@ -956,6 +1072,9 @@ class LecteurAudio:
         self._creer_bouton(cadre_haut, "🖥 Écran compteurs",
                   commande=self._basculer_ecran_compteurs, taille=11,
                   padx=8, pady=4).pack(side="right", padx=10)
+        self._creer_bouton(cadre_haut, "🎨 Thème",
+                  commande=self._changer_theme, taille=11,
+                  padx=8, pady=4).pack(side="right", padx=(0, 10))
 
         # --- Barre de gestion des fichiers (au-dessus de la playlist) ---
         carte_fichiers, _, cadre_fichiers = self._creer_carte(self.racine, "Fichiers")
@@ -1062,24 +1181,24 @@ class LecteurAudio:
         carte_edition, _, cadre_edition = self._creer_carte(
             self.racine, "Édition (Shift+glisser pour sélectionner)")
         carte_edition.pack(fill="x", padx=10, pady=(0, 8))
-        self._creer_bouton(cadre_edition, "✂ Couper",
+        self._creer_bouton(cadre_edition, "Couper",
                   commande=lambda: self._editer("couper"), taille=14,
                   padx=9, pady=5).pack(side="left", padx=4)
-        self._creer_bouton(cadre_edition, "↗ Fondu in",
+        self._creer_bouton(cadre_edition, "Fondu in",
                   commande=lambda: self._editer("fade_in"), taille=14,
                   padx=9, pady=5).pack(side="left", padx=4)
-        self._creer_bouton(cadre_edition, "↘ Fondu out",
+        self._creer_bouton(cadre_edition, "Fondu out",
                   commande=lambda: self._editer("fade_out"), taille=14,
                   padx=9, pady=5).pack(side="left", padx=4)
-        self._creer_bouton(cadre_edition, "⟦ ⟧ Rogner",
+        self._creer_bouton(cadre_edition, "Rogner",
                   commande=lambda: self._editer("rogner"), taille=14,
                   padx=9, pady=5).pack(side="left", padx=4)
-        self._creer_bouton(cadre_edition, "✖ Sél.",
+        self._creer_bouton(cadre_edition, "Sup. Sél.",
                   commande=self._effacer_selection, taille=14,
                   padx=9, pady=5).pack(side="left", padx=(14, 4))
         # Boucle A-B : reboucle la lecture sur la zone sélectionnée
         self.boucle_ab = tk.BooleanVar(value=False)
-        tk.Checkbutton(cadre_edition, text="🔁 Boucle A‑B",
+        tk.Checkbutton(cadre_edition, text="Boucle A‑B",
                   variable=self.boucle_ab, command=self._basculer_boucle_ab,
                   indicatoron=False, bg=FOND_CLAIR, fg=TEXTE, selectcolor=VERT,
                   activebackground=SURVOL_CLAIR, activeforeground=TEXTE,

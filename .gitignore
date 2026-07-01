@@ -19,5 +19,8 @@ carts.json
 # Données utilisateur : boucles A-B enregistrées sur les morceaux
 boucles.json
 
+# Préférence utilisateur : thème choisi (fond + accent)
+theme.json
+
 # Fichiers reçus depuis le téléphone (télécommande) : enregistrés au runtime
 Reçus téléphone/
